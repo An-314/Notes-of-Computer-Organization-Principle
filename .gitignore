@@ -1,3 +1,6 @@
 files/
 builds/
 *.pdf
+
+compile_commands.json
+.cache/
