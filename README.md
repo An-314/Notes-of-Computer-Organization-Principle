@@ -8,7 +8,9 @@
 ## 参考资料
 
 * [CSAPP](https://www.cs.sfu.ca/~ashriram/Courses/CS295/assets/books/CSAPP_2016.pdf)
-
+* [CSAPP中文版教材](https://annas-archive.org/md5/0f9b27d5b689048ee84c32a0570c28bd)
+* [课后习题](https://dreamanddead.github.io/CSAPP-3e-Solutions/)
+* [实验Lab](https://github.com/Exely/CSAPP-Labs)
 
 ## 项目结构
 
