@@ -1,5 +1,4 @@
 #include "saturating_add.h"
-#include <limits.h>
 
 int saturating_add(int x, int y) {
   int s = x + y;
@@ -14,11 +13,7 @@ int saturating_add(int x, int y) {
   int neg_over = sx & sy & (~ss);
 
   // 选择结果
-  if (pos_over) {
-    return INT_MAX;
-  } else if (neg_over) {
-    return INT_MIN;
-  } else {
-    return s;
-  }
+  int tmin = 1 << 31; // INT_MIN
+  int tmax = ~tmin;   // INT_MAX
+  return (pos_over & tmax) | (neg_over & tmin) | ((~(pos_over | neg_over)) & s);
 }
