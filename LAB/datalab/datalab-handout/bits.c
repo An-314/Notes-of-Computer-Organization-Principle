@@ -218,9 +218,9 @@ int isAsciiDigit(int x) {
  *   Rating: 3
  */
 int conditional(int x, int y, int z) {
-  // mask 为 0xFFFFFFFF(x != 0) 或 0x00000000(x == 0)
+  // mask 为 0xFFFFFFFF(x == 0) 或 0x00000000(x != 0)
   int mask = ~(!x) + 1;
-  return (mask & y) | (~mask & z);
+  return (~mask & y) | (mask & z);
 }
 /* 
  * isLessOrEqual - if x <= y  then return 1, else return 0 
@@ -230,7 +230,14 @@ int conditional(int x, int y, int z) {
  *   Rating: 3
  */
 int isLessOrEqual(int x, int y) {
-  return 2;
+  // 考虑符号位不同和相同的情况
+  int sign_x = (x >> 31) & 1;
+  int sign_y = (y >> 31) & 1;
+  int sign_diff = sign_x ^ sign_y; // 符号位不同
+  int diff = y + (~x + 1); // y - x
+  int sign_diff_res = sign_x & sign_diff; // x为负，y为正
+  int sign_same_res = !(diff >> 31) & (!sign_diff); // 符号位相同且y - x >= 0
+  return sign_diff_res | sign_same_res;
 }
 //4
 /* 
@@ -242,7 +249,8 @@ int isLessOrEqual(int x, int y) {
  *   Rating: 4 
  */
 int logicalNeg(int x) {
-  return 2;
+  // x | -x 的符号位为0当且仅当x为0
+  return (((x | (~x + 1)) >> 31)^1) & 1;
 }
 /* howManyBits - return the minimum number of bits required to represent x in
  *             two's complement
@@ -257,7 +265,22 @@ int logicalNeg(int x) {
  *  Rating: 4
  */
 int howManyBits(int x) {
-  return 0;
+  // 负数取反，正数不变
+  int ux = x ^ (x >> 31);
+  // 寻找最高 1 位
+  int b16, b8, b4, b2, b1, b0;
+  b16 = !!(ux >> 16) << 4; // 高16位
+  ux = ux >> b16;
+  b8 = !!(ux >> 8) << 3; // 高8位
+  ux = ux >> b8;
+  b4 = !!(ux >> 4) << 2; // 高4位
+  ux = ux >> b4;
+  b2 = !!(ux >> 2) << 1; // 高2位
+  ux = ux >> b2;
+  b1 = !!(ux >> 1); // 高1位
+  ux = ux >> b1;
+  b0 = ux; // 最低位
+  return b16 + b8 + b4 + b2 + b1 + b0 + 1; // 加上符号位
 }
 //float
 /* 
@@ -272,7 +295,31 @@ int howManyBits(int x) {
  *   Rating: 4
  */
 unsigned floatScale2(unsigned uf) {
-  return 2;
+  unsigned sign = uf & 0x80000000u;
+  unsigned exp  = (uf >> 23) & 0xFFu;
+  unsigned frac = uf & 0x7FFFFFu;
+
+  if (exp == 0xFFu) {
+    // NaN 或 ±Inf：原样返回
+    return uf;
+  }
+  if (exp == 0) {
+    // 非规格化数：左移frac
+    frac = frac << 1;
+    if (frac & 0x800000u) {
+      // 成为规格化数：exp=1，去掉最高位
+      exp = 1;
+      frac = frac & 0x7FFFFFu;
+    }
+  } else {
+    // 规格化数：exp+1
+    exp = exp + 1;
+    if (exp == 0xFFu) {
+      // 变为±Inf
+      frac = 0;
+    }
+  }
+  return sign | (exp << 23) | frac;
 }
 /* 
  * floatFloat2Int - Return bit-level equivalent of expression (int) f
@@ -287,7 +334,27 @@ unsigned floatScale2(unsigned uf) {
  *   Rating: 4
  */
 int floatFloat2Int(unsigned uf) {
-  return 2;
+  unsigned sign = uf >> 31;
+  unsigned expField = (uf >> 23) & 0xFFu;
+  unsigned frac = uf & 0x7FFFFFu;
+  int E = expField - 127; // 真指数
+  unsigned M = frac | 0x800000u; // 尾数
+  int val;
+
+  // NaN 或 ±Inf
+  if (expField == 0xFFu) return 0x80000000u;
+  // 非规格化数：绝对值小于1
+  if (expField == 0) return 0;
+  // 规格化
+  if (E < 0) return 0;
+  // 超出范围
+  if (E > 31) return 0x80000000u;
+  // E>=23时左移，否则右移
+  if (E >= 23) val = (int)(M << (E - 23));
+  else val = (int)(M >> (23 - E));
+
+  if (sign) val = -val;
+  return val;
 }
 /* 
  * floatPower2 - Return bit-level equivalent of the expression 2.0^x
@@ -303,5 +370,17 @@ int floatFloat2Int(unsigned uf) {
  *   Rating: 4
  */
 unsigned floatPower2(int x) {
-    return 2;
+    if (x < -149) {
+        // 太小，返回0
+        return 0;
+    }
+    if (x < -126) {
+        // 非规格化数
+        return 1u << (x + 149);
+    }
+    if (x > 127) {
+        // 太大，返回+INF
+        return 0x7F800000u;
+    }
+    return (x + 127) << 23;
 }
