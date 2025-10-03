@@ -335,26 +335,21 @@ unsigned floatScale2(unsigned uf) {
  */
 int floatFloat2Int(unsigned uf) {
   unsigned sign = uf >> 31;
-  unsigned expField = (uf >> 23) & 0xFFu;
+  unsigned exp = (uf >> 23) & 0xFFu;
   unsigned frac = uf & 0x7FFFFFu;
-  int E = expField - 127; // 真指数
-  unsigned M = frac | 0x800000u; // 尾数
+  unsigned M = (1u << 23) | frac; // 尾数
   int val;
 
   // NaN 或 ±Inf
-  if (expField == 0xFFu) return 0x80000000u;
-  // 非规格化数：绝对值小于1
-  if (expField == 0) return 0;
-  // 规格化
-  if (E < 0) return 0;
-  // 超出范围
-  if (E > 31) return 0x80000000u;
+  if (exp == 0xFFu) return 0x80000000u;
+  // 非规格化数，以及E<0的规格化：绝对值小于1
+  if (exp < 127u) return 0;
+  // E>=31超出范围
+  if (exp >= 158u) return 0x80000000u;
   // E>=23时左移，否则右移
-  if (E >= 23) val = (int)(M << (E - 23));
-  else val = (int)(M >> (23 - E));
-
-  if (sign) val = -val;
-  return val;
+  if (exp >= 150u) val = M << (exp - 150u);  // E >= 23
+  else val = M >> (150u - exp); // E < 23
+  return sign ? (~val + 1u) : val;
 }
 /* 
  * floatPower2 - Return bit-level equivalent of the expression 2.0^x
@@ -370,17 +365,8 @@ int floatFloat2Int(unsigned uf) {
  *   Rating: 4
  */
 unsigned floatPower2(int x) {
-    if (x < -149) {
-        // 太小，返回0
-        return 0;
-    }
-    if (x < -126) {
-        // 非规格化数
-        return 1u << (x + 149);
-    }
-    if (x > 127) {
-        // 太大，返回+INF
-        return 0x7F800000u;
-    }
+    if (x < -149) return 0; // 太小，返回0
+    if (x < -126) return 1u << (x + 149); // 非规格化数
+    if (x > 127) return 0x7F800000u; // 太大，返回+INF
     return (x + 127) << 23;
 }
