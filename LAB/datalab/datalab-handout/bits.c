@@ -218,9 +218,10 @@ int isAsciiDigit(int x) {
  *   Rating: 3
  */
 int conditional(int x, int y, int z) {
-  // mask 为 0xFFFFFFFF(x == 0) 或 0x00000000(x != 0)
-  int mask = ~(!x) + 1;
-  return (~mask & y) | (mask & z);
+  // mask 为 0xFFFFFFFF(x != 0) 或 0x00000000(x == 0)
+  int t = !!x;
+  int mask = (t << 31) >> 31;   // 或者：int mask = -t;
+  return (mask & y) | (~mask & z);
 }
 /* 
  * isLessOrEqual - if x <= y  then return 1, else return 0 
