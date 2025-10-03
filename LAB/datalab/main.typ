@@ -431,6 +431,49 @@ make
 ```
 输出如下
 ```log
+1. Running './dlc -z' to identify coding rules violations.
 
+2. Compiling and running './btest -g' to determine correctness score.
+gcc -O -Wall -m32 -lm -o btest bits.c btest.c decl.c tests.c
+btest.c: In function ‘test_function’:
+btest.c:334:23: warning: ‘arg_test_range’ may be used uninitialized [-Wmaybe-uninitialized]
+  334 |     if (arg_test_range[2] < 1)
+      |         ~~~~~~~~~~~~~~^~~
+btest.c:299:9: note: ‘arg_test_range’ declared here
+  299 |     int arg_test_range[3]; /* test range for each argument */
+      |         ^~~~~~~~~~~~~~
+
+3. Running './dlc -Z' to identify operator count violations.
+
+4. Compiling and running './btest -g -r 3' to determine performance score.
+gcc -O -Wall -m32 -lm -o btest bits.c btest.c decl.c tests.c
+btest.c: In function ‘test_function’:
+btest.c:334:23: warning: ‘arg_test_range’ may be used uninitialized [-Wmaybe-uninitialized]
+  334 |     if (arg_test_range[2] < 1)
+      |         ~~~~~~~~~~~~~~^~~
+btest.c:299:9: note: ‘arg_test_range’ declared here
+  299 |     int arg_test_range[3]; /* test range for each argument */
+      |         ^~~~~~~~~~~~~~
+
+
+5. Running './dlc -e' to get operator count of each function.
+
+Correctness Results     Perf Results
+Points  Rating  Errors  Points  Ops     Puzzle
+1       1       0       3       7       bitXor
+1       1       0       3       1       tmin
+1       1       0       3       8       isTmax
+2       2       0       3       7       allOddBits
+2       2       0       3       2       negate
+3       3       0       3       11      isAsciiDigit
+3       3       0       3       8       conditional
+3       3       0       3       14      isLessOrEqual
+4       4       0       3       6       logicalNeg
+4       4       0       3       32      howManyBits
+4       4       0       3       14      floatScale2
+4       4       0       3       16      floatFloat2Int
+4       4       0       3       9       floatPower2
+
+Score = 75/75 [36/36 Corr + 39/39 Perf] (135 total operators)
 ```
-只有一些编译警告，可以忽略。每个函数的功能都得到了验证。
+所有函数都按要求完成，所有测试用例都通过。
