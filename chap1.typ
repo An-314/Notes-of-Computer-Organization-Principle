@@ -570,6 +570,8 @@ $
 
 *信息 = 位 + 上下文*
 
+#pagebreak()
+
 = Floating Point
 
 == Background: Fractional binary numbers
