@@ -825,3 +825,784 @@ movq Source, Des
     - AT&T 与 Intel，我们使用的是 AT&T 风格
   - 汇编器
     - GNU ASM 与 MASM等
+
+== Arithmetic & Control
+
+=== Control: Condition codes
+
+*控制流*
+```c
+extern void op1(void);
+extern void op2(void);
+
+void decision(int x) {
+    if (x) {
+        op1();
+    } else {
+        op2();
+    }
+}
+```
+```
+decision(x)
+ ├── if (x != 0)
+ │     └── op1();
+ └── else
+       └── op2();
+```
+汇编实现（x86-64, AT&T 语法）
+```asm
+decision:
+    subq    $8, %rsp        # 分配栈空间（栈向下）
+    testl   %edi, %edi      # 设置条件码：检查 x 是否为 0
+    je      .L2             # 如果 x == 0，跳到 else 分支
+    call    op1             # 调用 op1()
+    jmp     .L1             # 跳过 else，去结尾
+.L2:
+    call    op2             # 调用 op2()
+.L1:
+    addq    $8, %rsp        # 释放栈空间
+    ret                     # 返回
+```
+事实上和高级语言中的GOTO比较相似
+
+*Processor State（处理器状态）*
+
+在任何时刻，CPU 需要保存“程序执行的当前状态”，包括：
+#three-line-table[
+  | 类型         | 寄存器 / 状态                      | 用途                 |
+  | :--------- | :---------------------------- | :----------------- |
+  | *通用寄存器*  | `%rax`、`%rbx`、`%rcx`、… `%r15` | 存放临时数据、函数参数、返回值等   |
+  | *栈指针*    | `%rsp`                        | 指向栈顶（当前栈帧顶端）       |
+  | *基址指针*   | `%rbp`                        | （可选）指向当前栈帧底部       |
+  | *指令指针*   | `%rip`                        | 指向*下一条要执行的指令地址*  |
+  | *条件码寄存器* | `CF`、`ZF`、`SF`、`OF`           | 存放最近一次算术/逻辑运算结果的状态 |
+]
+前面的各种寄存器在64位架构中为64位的，而条件码寄存器只需要1bit。这四个“条件码”是 CPU 判断的基础，它们不是显式寄存器，而是存储在 CPU 的 EFLAGS（状态寄存器） 中的几个比特位。
+
+*Condition Codes（条件码）*
+#three-line-table[
+  | 名称                     | 含义            | 适用情况         |
+  | :--------------------- | :------------ | :----------- |
+  | *CF (Carry Flag)*    | 无符号运算中最高位产生进位 | 无符号加/减法      |
+  | *ZF (Zero Flag)*     | 结果是否为 0       | 所有算术逻辑运算     |
+  | *SF (Sign Flag)*     | 结果的最高位（符号位）   | 有符号数判断正/负    |
+  | *OF (Overflow Flag)* | 有符号溢出         | 两个同号数相加后符号变化 |
+]
+- 示例：`addq Src, Dest`
+  ```asm
+  addq %rbx, %rax   # rax = rax + rbx
+  ```
+  隐含过程：
+  ```
+  t = a + b
+  ```
+  #three-line-table[
+    | 条件码 | 触发条件               | 含义             |
+    | :-- | :----------------- | :------------- |
+    | CF  | 如果结果在无符号运算中“进位”    | 无符号溢出（超过 2^64） |
+    | ZF  | 如果结果为 0            | 检测相等  `t == 0`  |
+    | SF  | 如果结果为负（最高位 = 1）    | 判断符号（有符号） `t < 0` |
+    | OF  | 如果正数+正数得负，或负数+负数得正 | 有符号溢出  `(a>0 && b>0 && t<0) || (a<0 && b<0 && t>=0)`   |
+  ]
+- 条件码的来源
+  - 条件码是隐式设置（Implicitly Set）的：
+    - 加减法（`add, sub`）
+    - 比较（`cmp, test`）
+    - 逻辑运算（`and, or, xor`）
+    - 但有些指令不会修改条件码，比如`leaq`：它只是做整数计算，不影响条件码（这也是它非常受编译器喜欢的原因之一）。
+- *Zero Flag (ZF)* ZF 置位（=1）当且仅当结果为零：
+  ```
+  00000000000000000000000000000000
+  ↑所有位都是 0
+  ```
+  举例：
+  ```asm
+  subq %rax, %rax   # 0
+  # → ZF = 1 （因为结果为0）
+  ```
+  在 C 里相当于：
+  ```c
+  if (x == 0)
+  ```
+- *Sign Flag (SF)* SF 置位（=1）当结果为负（最高位 = 1）：
+  ```
+  1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  ↑符号位为1 → 负数
+  ```
+  举例：
+  ```asm
+  movq $-5, %rax  # 结果为负 → SF = 1
+  ```
+- *Carry Flag (CF)* CF：在无符号算术中，判断是否有“进位”或“借位”。
+  - 加法：最高位产生进位 → CF = 1
+    ```
+      1xxxxxxxxxxxx...
+    + 1xxxxxxxxxxxx...
+    -----------------
+     1xxxxxxxxxxxx...
+     ↑最高位进位 → CF = 1
+    ```
+  - 减法：需要借位 → CF = 1
+    ```
+     10xxxxxxxxxxxx...
+    - 1xxxxxxxxxxxx...
+    = 1xxxxxxxxxxxx...
+      ↑需要借位 → CF = 1
+    ```
+  - 对无符号数，CF 表示溢出（overflow）；对有符号数，CF 没有意义
+- *Overflow Flag (OF)* OF：在有符号算术中，结果超出可表示范围时置位。与 CF 不同，它关注的是“符号错误”，不是进位。
+  - 正溢出 (Positive Overflow)
+    ```
+    (a>0 && b>0 && t<0) || (a<0 && b<0 && t>=0)
+    ```
+  - 负溢出 (Negative Overflow)
+    ```
+    (a>0 && b<0 && t<0) || (a<0 && b>0 && t>0)
+    ```
+
+*显式设置条件码*
+- `cmp` 指令 —— 比较（Compare）
+  ```
+  cmp a, b
+  ```
+  - 执行逻辑：`t = b - a`
+  - 然后根据 t 的结果设置条件码（ZF, SF, OF, CF）
+  - `sub`会改变寄存器内容（保存结果）；`cmp`不改变寄存器，只更新标志位
+  - 示例：判断 `if (a < b)`
+    ```asm
+    cmpq %rsi, %rdi      # 计算 rdi - rsi
+    jl   LESS            # 如果结果 < 0（有符号），跳转
+    ```
+- `test` 指令 —— 测试（Test）
+  ```
+  test a, b
+  ```
+  - 执行逻辑：`t = b & a`
+  - 然后根据结果设置 ZF 和 SF（不设置 CF、OF）
+  - 同样不修改任何寄存器，只更新标志位
+  - 常见用途
+    - 判断寄存器是否为零
+      ```asm
+      test %rdi, %rdi
+      je   ELSE          # 如果结果为0，跳转
+      ```
+      等价于`if (x == 0)`
+    - 检查两个寄存器是否有公共置位
+      ```asm
+      test %rsi, %rdi
+      jne  FOUND
+      ```
+      等价于`if (x & y)  // 有共同置位`
+
+#note(subname: [小结])[
+  条件码的构成、设置、访问
+  - 四个标识：CF，ZF，SF，OF
+  - 两种设置方法
+    - 显式：CMP与TEST
+    - 隐式：算数运算
+  - 两种访问方法
+    - 显式： SET指令
+    - 隐式：条件跳转、条件赋值（条件传送）
+]
+
+=== Conditional branches
+
+*跳转（Jumping）*
+- 在汇编语言中，程序的执行顺序不是固定的线性执行
+  - 如果条件满足 → 跳到某个标签执行别的代码
+  - 否则 → 继续顺序执行
+- 跳转是对CPU不友好的
+- jX 指令概览
+  ```asm
+  jX LABEL
+  ```
+  #three-line-table[
+    | 指令            | 条件（逻辑表达式）          | 说明            | 比较类型          |
+    | :------------ | :----------------- | :------------ | :------------ |
+    | *jmp*       | 恒为真（1）             | 无条件跳转         | —             |
+    | *je / jz*   | ZF = 1             | 相等 / 零        | 通用            |
+    | *jne / jnz* | ZF = 0             | 不相等 / 非零      | 通用            |
+    | *js*        | SF = 1             | 结果为负          | 有符号           |
+    | *jns*       | SF = 0             | 结果非负          | 有符号           |
+    | *jg*        | `~(SF ^ OF) & ~ZF` | 大于 (signed)   | 有符号           |
+    | *jge*       | `~(SF ^ OF)`       | 大于等于 (signed) | 有符号           |
+    | *jl*        | `(SF ^ OF)`        | 小于 (signed)   | 有符号           |
+    | *jle*       | `(SF ^ OF) | ZF`           | 小于等于 (signed) | 有符号 |
+    | *ja*        | `~CF & ~ZF`        | 大于 (unsigned) | 无符号           |
+    | *jb*        | `CF`               | 小于 (unsigned) | 无符号           |
+  ]
+- 两类比较：有符号 vs 无符号
+
+  在 C 语言中：
+  ```c
+  if ((unsigned)a < (unsigned)b) ...
+  if ((int)a < (int)b) ...
+  ```
+  编译器会根据类型选择不同的跳转指令
+  #three-line-table[
+    | 比较类型               | 小于   | 小于等于  | 大于   | 大于等于  |
+    | :----------------- | :--- | :---- | :--- | :---- |
+    | *有符号 (signed)*   | `jl` | `jle` | `jg` | `jge` |
+    | *无符号 (unsigned)* | `jb` | `jbe` | `ja` | `jae` |
+  ]
+  区别在于判断依据：
+  - 有符号 → 用 SF 与 OF（符号与溢出标志）
+  - 无符号 → 用 CF（进位标志）
+- 示例
+  - 判断相等 / 不等
+    ```asm
+    cmpq %rsi, %rdi      # 比较 rdi - rsi
+    je   EQUAL           # 如果相等 (ZF=1)
+    jne  NOTEQUAL        # 如果不相等 (ZF=0)
+    ```
+    ```c
+    if (a == b) { ... }
+    else { ... }
+    ```
+  - 判断有符号大小
+    ```asm
+    cmpq %rsi, %rdi     # 比较 rdi - rsi
+    jl   LESS            # 如果 a < b (signed)
+    jge  GREATER_EQUAL   # 如果 a >= b
+    ```
+    C 对应：
+    ```c
+    if (a < b) { ... }
+    ```
+  - 判断无符号大小
+    ```asm
+    cmpq %rsi, %rdi
+    jb   BELOW           # if (a < b) unsigned
+    jae  ABOVE_EQUAL     # if (a >= b)
+    ```
+    C 对应：
+    ```c
+    if ((unsigned)a < (unsigned)b)
+    ```
+*条件置位指令（Conditional Set Instructions）*
+- 根据条件码（Condition Codes），把目标寄存器的最低字节（low-order byte） 设置为 0 或 1
+  - 只修改目标寄存器的*最低 8 位*`%al, %r8b`
+  - 不会影响其他 7 个字节
+  - 通常用于把逻辑判断结果保存成一个布尔值
+- SetX 指令
+  ```
+  setX   Dest
+  ```
+- 常用 SetX 指令表
+  #three-line-table[
+    | 指令        | 条件码逻辑              | 含义（C语言等价）            | 比较类型                 |
+    | :-------- | :----------------- | :------------------- | :------------------- |
+    | *sete*  | `ZF`               | 相等 (`==`)            | 通用                   |
+    | *setne* | `~ZF`              | 不相等 (`!=`)           | 通用                   |
+    | *sets*  | `SF`               | 结果为负                 | 有符号                  |
+    | *setns* | `~SF`              | 结果为非负                | 有符号                  |
+    | *setg*  | `~(SF ^ OF) & ~ZF` | 大于 (signed) (`>`)    | 有符号                  |
+    | *setge* | `~(SF ^ OF)`       | 大于等于 (signed) (`>=`) | 有符号                  |
+    | *setl*  | `(SF ^ OF)`        | 小于 (signed) (`<`)    | 有符号                  |
+    | *setle* | `(SF ^ OF) | ZF`                  | 小于等于 (signed) (`<=`) | 有符号 |
+    | *seta*  | `~CF & ~ZF`        | 高于 (unsigned) (`>`)  | 无符号                  |
+    | *setb*  | `CF`               | 低于 (unsigned) (`<`)  | 无符号                  |
+  ]
+- `SetX + movzbl` 在实际函数返回布尔值时的用法
+  - *32 位寄存器写操作会自动清零高 32 位*
+  - C语言代码
+    ```c
+    int gt(long x, long y) {
+        return x > y;
+    }
+    ```
+    目标是返回一个 int 值：若 `x > y` → 返回 `1`，否则 → 返回 `0`
+  - 对应的汇编
+    ```
+    gt:
+        cmpq   %rsi, %rdi       # 比较 x - y
+        setg   %al              # 若 x > y，则 %al = 1，否则 0
+        movzbl %al, %eax        # 零扩展 1 字节 → 32 位寄存器 %eax
+        ret
+    ```
+    把 `%al`（低 8 位）零扩展为 32 位寄存器 `%eax`
+    - `%eax = 0x00000000` 或 `0x00000001`
+    - 并且，写入 `%eax` 时会自动清零高 32 位，所以 `%rax = 0x00000000_00000000` 或 `0x00000000_00000001`。
+  - 注意事项：`movzbl` 的“怪异之处”
+    - 把 1 字节寄存器的值复制到 32 位寄存器中，并用 0 填充高位（零扩展）
+
+*条件分支的传统实现方式*
+- 通过条件跳转（`jle`、`jmp` 等）来实现 `if/else` 控制流
+- 源代码
+  ```c
+  long absdiff(long x, long y) {
+        long result;
+        if (x > y)
+            result = x - y;
+        else
+            result = y - x;
+        return result;
+    }
+  ```
+- 编译得到的汇编
+  ```
+  absdiff:
+      cmpq   %rsi, %rdi     # 比较 x 和 y
+      jle    .L4            # 如果 x <= y，跳转到 else 分支
+      movq   %rdi, %rax     # x 拷贝到返回寄存器 rax
+      subq   %rsi, %rax     # result = x - y
+      ret                   # 返回
+  .L4:                      # else 分支
+      movq   %rsi, %rax     # y 拷贝到返回寄存器
+      subq   %rdi, %rax     # result = y - x
+      ret
+  ```
+  寄存器说明
+  #three-line-table[
+    | 寄存器    | 用途          |
+    | :----- | :---------- |
+    | `%rdi` | 参数 x        |
+    | `%rsi` | 参数 y        |
+    | `%rax` | 返回值（result） |
+  ]
+- C 中等价的 “goto” 版本
+  - 编译器实际上会把 if-else 转换为带标签的跳转逻辑
+  - ```c
+    long absdiff_j(long x, long y) {
+        long result;
+        int ntest = (x <= y);
+        if (ntest) goto Else;   // 条件跳转
+        result = x - y;
+        goto Done;              // 无条件跳转到结尾
+    Else:
+        result = y - x;
+    Done:
+        return result;
+    }
+    ```
+
+  #note(subname: [关于goto的讨论])[
+    原函数：
+    ```c
+    long absdiff(long x, long y) {
+        long result;
+        if (x > y)
+            result = x - y;
+        else
+            result = y - x;
+        return result;
+    }
+    ```
+    可以变成两种goto版本
+    ```c
+    long absdiff_goto(long x, long y) {
+        long result;
+        int ntest = (x <= y);
+        if (ntest) goto Else;   // 条件跳转
+        result = x - y;
+        goto Done;              // 无条件跳转到结尾
+    Else:
+        result = y - x;
+    Done:
+        return result;
+    }
+    ```
+    ```c
+    long absdiff_goto_alt(long x, long y) {
+        long result;
+        int t = (x > y);
+        if (t) goto True;       // if 成立：跳到 then 部分
+        result = y - x;         // else-statement 放在前面
+        goto Done;
+    True:
+        result = x - y;         // then-statement 放在 true: 之后
+    Done:
+        return result;
+    }
+    ```
+    - 规则 1
+      - 先放 then 块
+      - `if (!t) goto Else; … jmp Done; … Else: …`
+      - 适合 then 为常见路径、希望 fall-through 直行、不额外跳转
+    - 规则 2
+      - 先放 else 块
+      - `if (t) goto True; … goto Done; … True: then …`
+      - 适合 else 为常见路径，同理让常见路径自然落空直行
+    选择依据：
+    - 哪条分支更常走：把更常走的分支安排为 fall-through（顺序路径），减少一次跳转，提高指令流水 & 分支预测命中率
+    - 是否有 else：如果没有 else，原来那种“`if (!t) goto Done; then; Done:`”更简洁（只有一次条件跳转，无需额外 goto）
+    - 代码布局/可读性：有时希望把“结果路径”放在结尾，减少多处 ret 或合并清理代码
+    - 寄存器/活跃范围：不同布局会影响变量活跃区间与寄存器压力；把常用路径放顺序区往往更友好
+  ]
+
+*Conditional Moves*
+- C源码
+  ```c
+  val = Test ? Then_Expr : Else_Expr;
+  ```
+  GOTO版本
+  ```c
+        ntest = !Test;
+        if (ntest) goto Else;
+        val = Then_Expr;
+    goto Done;
+  Else:
+    val = Else_Expr;
+  Done:
+  ```
+  - `val = x>y ? x-y : y-x;`汇编为（System V: `x→%rdi, y→%rsi`）
+    - ```asm
+      cmpq  %rsi, %rdi        # x ? y
+      jle   .Lelse            # if (x <= y) goto else
+      movq  %rdi, %rax
+      subq  %rsi, %rax        # rax = x - y
+      jmp   .Ldone
+      .Lelse:
+      movq  %rsi, %rax
+      subq  %rdi, %rax        # rax = y - x
+      .Ldone:
+      ret
+      ```
+  - 只会执行被选中的那条路径；但有分支跳转，可能引发分支预测失误，打断流水线。
+- 条件传送Conditional Moves（`cmov`）
+  - 先把两个结果都算好，再根据条件把其中一个搬进目的寄存器，从而不跳转
+  - `cmov`
+    ```asm
+    cmovX src dest
+    ```
+    - `X` 是条件码，比如 `le`（小于等于）、`ge`（大于等于）等；条件与 jX 同名同义：`cmove/cmovne/cmovl/cmovg/cmovle/cmovge/cmova/cmovb/cmovs/cmovns/...`
+    - 目的必须是寄存器；来源可寄存器/内存
+    - 语义：`if (cond) Dest ← Src`（不改条件码）
+  - 汇编为`x→%rdi, y→%rsi`
+    ```asm
+    # 先算 then = x - y 到 %rax
+    movq  %rdi, %rax
+    subq  %rsi, %rax
+    # 再算 else = y - x 到 %rcx
+    movq  %rsi, %rcx
+    subq  %rdi, %rcx
+    # 用 cmp 设置条件码
+    cmpq  %rsi, %rdi        # x ? y
+    # 若 x <= y，则把 else 搬到 %rax；否则保留 then
+    cmovle %rcx, %rax       # if (x <= y) rax = rcx
+    ret
+    ```
+- 编译器“何时用 cmov 而不是分支”的三条准则
+  - 语义安全
+    - 三目运算在 C 里只会求值一边。用 `cmov` 时通常要把两边都先算出来：
+    - 如果任一边可能有副作用（写内存、I/O、++）、可能产生异常/陷阱（如越界解引用、除零）、或volatile 访问 —— 编译器不能用 `cmov`
+    - 只有当两边都是“纯表达式”（无副作用、不会 fault）时，`cmov` 才是安全的
+  - 性能模型
+    - 难以预测/随机数据导致分支经常失误 → `cmov` 通常更快（无控制转移）
+    - 高度可预测的分支（比如几乎总是 true） → 传统分支往往更快（只执行一边；`cmov` 要算两边，白做一半的工）
+    - 两边的计算成本差距大时：分支可能更好（避免做“贵的那边”）；`cmov` 会把两边都做了
+  - 标志依赖与调度
+    - `cmov` 依赖刚刚设置的条件码；中间不能插入会修改标志位的指令（`add/sub/and/...`）
+    - 编译器会尽量把 `cmp/test` 和 `cmov` 挨得很近，避免 flags 被污染
+  - 分支版 vs cmov 版
+    #three-line-table[
+      | 方案     | 优点                 | 缺点              | 适用场景              |
+      | ------ | ------------------ | --------------- | ----------------- |
+      | 分支（jX） | 只执行一边；便于跳过昂贵路径     | 可能分支预测失败，流水线被冲掉 | 条件高可预测；或某边昂贵/有副作用 |
+      | cmov   | 无跳转，流水线友好；适合不可预测数据 | 两边都要算；要求纯表达式且安全 | 数据依赖难预测、代价相近、无副作用 |
+    ]
+- 示例
+  - 计算很昂贵（Expensive Computations）— 性能差
+    ```c
+    val = Test(x) ? Hard1(x) : Hard2(x);
+    ```
+  - 存在“危险计算”（Risky Computations）— 可能崩掉或产生不良后果
+    ```c
+    val = p ? *p : 0;
+    ```
+    若用 `cmov` 思路，通常会 先执行 `*p` 的内存读取，即使 `p == NULL`，也会触发缺页/段错；而 C 的 `?:` 语义是 只求值一边：当 `p==NULL` 时不会去解引用。
+  - 有副作用（side effects）— 语义错误，甚至非法
+    ```c
+    val = x > 0 ? x *= 7 : x += 3;
+    ```
+=== Loops
+
+*Do-While循环*
+- 语义与 goto 版（do–while）
+  - C源码
+    ```c
+    long pcount_do(unsigned long x) {
+        long result = 0;
+        do {
+            result += x & 0x1;
+            x >>= 1;
+        } while (x);
+        return result;
+    }
+    ```
+  - 等价 goto：
+    ```c
+    long pcount_goto(unsigned long x) {
+        long result = 0;
+    loop:
+        result += x & 1;
+        x >>= 1;
+        if (x) goto loop;   // do–while：先执行一次，再判断
+        return result;
+    }
+    ```
+    - 统计 1 比特
+    - 要点：循环体至少执行 1 次；条件检查在末尾
+- 汇编逐行对应（AT&T，System V：`x→%rdi，result→%rax`）
+  ```asm
+      movl  $0, %eax        # result = 0   (写 %eax 也会清 %rax 的高 32 位)
+  .L2:                   # loop:
+      movq  %rdi, %rdx      #   t = x
+      andl  $1, %edx        #   t = x & 1   (只保留最低位；结果放 %edx/%rdx)
+      addq  %rdx, %rax      #   result += t
+      shrq  %rdi            #   x >>= 1     (逻辑右移 1 位)
+      jne   .L2             #   if (x != 0) goto loop
+      rep; ret              # return result
+  ```
+- *通用 do–while 翻译模板*
+  - C
+    ```c
+    do {
+        Body;            // S1; S2; ... Sn;
+    } while (Test);
+    ```
+  - GOTO
+    ```c
+    loop:
+        Body;            // S1; S2; ... Sn;
+        if (Test) goto loop;
+    ```
+
+*While循环*
+- Jump-to-Middle（跳到中间）
+  - 在 `-Og`（调试友好）常见
+  - while 版
+    ```c
+    while (Test) {
+        Body;            // S1; S2; ... Sn;
+    }
+    ```
+  - GOTO
+    ```c
+        goto test;      // 先跳到测试点
+    loop:
+        Body
+    test:
+        if (Test) goto loop;
+    done: ;
+    ```
+    - 入口一开始 goto test，先检测条件，再决定是否进入 Body
+    - 形状：入口 → test → (true? 回 loop 执行 Body : 退出)
+    - 便于把“判断”与“回跳”放在一起，debug 时更直观；但多了一个初始无条件跳转
+- Do-while Conversion（转成 do-while）
+  - 在 `-O1`（优化）常见
+  - while 版
+    ```c
+    while (Test) {
+        Body;            // S1; S2; ... Sn;
+    }
+    ```
+  - 转成 do-while 版
+    ```c
+    if (!Test) goto done;   // 入口守卫：不满足则直接退出
+    do {
+        Body
+    } while (Test);
+    done: ;
+    ```
+  - goto 等价
+    ```c
+        if (!Test) goto done;   // 入口守卫
+    loop:
+        Body
+        if (Test) goto loop;
+    done: ;
+    ```
+    - 入口先做一次守卫判断（guard），不满足就立即退出（无初始 jmp）
+    - 满足时进入一个 do-while 形状 的循环：Body 在前，测试+回跳在后
+    - 这在汇编上通常少一次跳转，布局也利于指令流水（test 与回跳相邻）
+#three-line-table[
+  | 维度      | Jump-to-Middle (-Og) | Do-while Conversion (-O1) |
+  | ------- | -------------------- | ------------------------- |
+  | 入口路径    | 先无条件跳到测试点            | 入口即条件守卫（可能直接退出）           |
+  | 跳转数量    | 多一个初始 `jmp`          | 一般更少                      |
+  | 可读/可调试性 | 判断点集中，结构直观           | 结构更像 do-while             |
+  | 性能取向    | 便于保留源结构，调试友好         | 更紧凑、预测好，常更高效              |
+  | 布局      | Body 与回跳测试分离         | Body 后紧跟测试与回跳             |
+]
+
+*for 循环*
+- 语义
+  - C源码
+    ```c
+    for (Init; Test; Update) {
+        Body;            // S1; S2; ... Sn;
+    }
+    ```
+  - 等价 do-while 版
+    ```c
+    Init;
+    if (!Test) goto done;   // 入口守卫
+    do {
+        Body;            // S1; S2; ... Sn;
+        Update;
+    } while (Test);
+    done: ;
+    ```
+  - goto 版
+    ```c
+      if (!Test)
+        goto done;
+    loop:
+      Body
+      Update
+      if (Test)
+        goto loop;
+    done:
+    ```
+    - 把“测试 + 回跳”放在循环体末尾，正好对上机器级的“设置条件码 → 条件跳转”
+- 初始测试可优化掉
+  - 在很多 for 循环里，第一次进入循环前的 Test 必定为真，所以编译器能把入口守卫去掉，直接落入循环体
+    - 常量边界且非空：
+      - 典型如 `for (i=0; i<WSIZE; i++)`，若编译器知道 `WSIZE > 0`（编译期常量，如 `64`），
+      - 则初次判断 `0 < WSIZE` 恒真 → 入口 `if (!Test) goto done;` 可删
+    - 已由前置检查/类型保证：
+      - 上下文或类型约束能保证第一次迭代必进
+    - 循环展开/向量化前的规范化：
+      - 编译器重排后把首轮工作合并进主循环，也常使入口守卫冗余
+  - 何时不能去掉初始测试
+    - `WSIZE` 可能为 0（或运行时变量，编译器不能证明 >0）
+    - 循环起始并非 `i=0`，或 `Test` 不是显然恒真的（如 `i<=N` 且 N 可能为负、溢出边界等）
+    - `Body` 在第一次就可能 fault 或有 副作用，而语义要求当 `Test` 不成立时完全不执行
+
+=== Switch Statements
+
+- C 语言层面的语义回顾
+  ```c
+  switch (x) {
+    case 0: f0(); break;
+    case 1: f1(); break;
+    case 2:
+    case 3: f23(); break;
+    default: fdefault(); break;
+  }
+  ```
+  等价逻辑（用 if-else 表示）：
+  ```c
+  if (x == 0)
+    f0();
+  else if (x == 1)
+    f1();
+  else if (x == 2 || x == 3)
+    f23();
+  else
+    fdefault();
+  ```
+  但编译器通常不会真的翻成一堆 cmp+je，它会根据 case 的分布和稠密程度选择不同策略
+- 编译器的三种主要翻译策略
+  - 直接链式比较（if-else chain）
+    - case 数量少，或离散、稀疏
+    ```asm
+    cmp   $0, %edi
+    je    .L0
+    cmp   $1, %edi
+    je    .L1
+    cmp   $2, %edi
+    je    .L2
+    jmp   .Ldefault
+    ```
+  - 跳转表（jump table）
+    - case 密集（例如 0–5 连续）
+    - 编译器创建一个表格，其中每项存储一个跳转目标地址
+    ```c
+    goto *jt[x];  // x 在 0..5 内，否则跳 default
+    ```
+    汇编结构
+    ```asm
+    cmp    $5, %edi
+    ja     .Ldefault          # if x > 5 -> default
+    jmp    *.LJTable(,%rdi,8) # 根据索引跳
+    .LJTable:
+        .quad .L0, .L1, .L2, .L3, .L4, .L5
+    ```
+    - 是跳转表（每个表项是 8 字节地址）
+    - `jmp *addr` 是间接跳转（indirect jump）
+    - 优点：时间复杂度 O(1)，无需逐一比较
+- 二分查找（binary search jump）
+  - case 较多但不连续，例如 `case 1, 10, 20, 100, 200`
+  - 编译器生成一串比较指令，通过范围拆分实现二分跳转：
+    ```asm
+    cmp   $20, %edi
+    jl    .Llow
+    cmp   $100, %edi
+    jl    .Lmid
+    ...
+    ```
+  - 优点：时间复杂度 O(log n)，比链式比较更快
+- 汇编层面的核心机制：间接跳转
+  ```asm
+  jmp *addr      # 跳转到内存中的地址（64 位）
+  jmp *(table,%reg,8)  # 跳到“table + reg×8”指定位置的地址
+  ```
+- Switch 到汇编的示意例子
+  ```c
+  int select(int x) {
+    switch (x) {
+      case 0: return 10;
+      case 1: return 20;
+      case 2: return 30;
+      default: return -1;
+    }
+  }
+  ```
+  GCC -O1 生成的汇编会类似：
+  ```asm
+  select:
+      cmp    $2, %edi
+      ja     .Ldefault
+      jmp    *.LJTable(,%rdi,8)
+  .LJTable:
+      .quad  .L0
+      .quad  .L1
+      .quad  .L2
+
+  .L0:  mov $10, %eax; ret
+  .L1:  mov $20, %eax; ret
+  .L2:  mov $30, %eax; ret
+  .Ldefault:
+      mov $-1, %eax
+      ret
+  ```
+
+#note(subname: [控制流总结])[
+  - C 控制结构 ↔ 汇编控制结构
+    #three-line-table[
+      | C语言结构           | 对应汇编控制机制                   | 实现方式                                      |
+      | --------------- | -------------------------- | ----------------------------------------- |
+      | `if / else`     | *条件跳转（conditional jump）* | `cmp` / `test` + `jX`（如 `je`, `jl`, `jg`） |
+      | `?:` (条件表达式)    | *条件传送（conditional move）* | `setX` + `movzbl` 或 `cmovX`               |
+      | `do-while`      | *循环 + 条件跳转*              | 循环体后判断条件再跳                                |
+      | `while` / `for` | *前测试循环*                  | 跳转到中间 或 转换为 do-while 形式                   |
+      | `switch`        | *间接跳转（indirect jump）*    | 跳转表（jump table）或 比较链（二叉树）                 |
+    ]
+  - 条件码（Condition Codes）
+    - 四个核心标志位
+      #three-line-table[
+        | 标志位    | 含义                 | 用于哪类比较             |
+        | ------ | ------------------ | ------------------ |
+        | *CF* | Carry Flag，进位标志    | 无符号溢出（加法进位 / 减法借位） |
+        | *ZF* | Zero Flag，零标志      | 结果是否为 0            |
+        | *SF* | Sign Flag，符号标志     | 结果是否为负数（最高位 1）     |
+        | *OF* | Overflow Flag，溢出标志 | 有符号溢出（正+正→负，负+负→正） |
+      ]
+    - 条件码的两种设置方式
+      #three-line-table[
+        | 类型       | 指令                   | 作用               |
+        | -------- | -------------------- | ---------------- |
+        | *显式访问* | `setX %rB`           | 将条件结果写入寄存器（0或1）  |
+        | *隐式访问* | `jX Label` / `cmovX` | 通过条件跳转或条件传送使用标志位 |
+      ]
+    - 条件码的两种访问方式
+      #three-line-table[
+        | 类型       | 指令                   | 作用               |
+        | -------- | -------------------- | ---------------- |
+        | *显式访问* | `setX %rB`           | 将条件结果写入寄存器（0或1）  |
+        | *隐式访问* | `jX Label` / `cmovX` | 通过条件跳转或条件传送使用标志位 |
+      ]
+]
