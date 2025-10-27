@@ -1651,7 +1651,7 @@ int Q(int i) {
   - 返回值 (`v[t]`)
 
 *三个机制的实现方式*
-- Passing Control — 控制传递
+- Passing Control — *控制传递*
   - 使用机器指令：
     - `call Label`
       - 将 下一条指令地址 压栈（保存返回点）
@@ -1707,7 +1707,7 @@ int Q(int i) {
 
 *栈的内存方向*
 - 栈从高地址向低地址增长（top → bottom）
-- 栈顶（Top）：由寄存器 %rsp 指向
+- 栈顶（Top）：由寄存器 `%rsp` 指向
 - 栈底（Bottom）：调用链最开始的栈帧（程序启动时的位置）
 ```
 高地址
@@ -1746,7 +1746,7 @@ int Q(int i) {
 - 每次函数调用会形成一个新的栈帧，保存该函数执行所需的一切状态
 - 典型结构：
   ```
-    ↑ 高地址
+  ↑ 高地址
   │
   │  调用者的帧（Caller）
   │  -------------------------
@@ -1771,7 +1771,621 @@ int Q(int i) {
   ```
 
 === Calling Conventions
+
 ==== Passing control
+
+一个函数是如何通过机器指令来调用另一个函数，并在结束后正确返回的。
+
+例子
+```c
+void multstore(long x, long y, long *dest) {
+    long t = mult2(x, y);
+    *dest = t;
+}
+long mult2(long a, long b) {
+    long s = a * b;
+    return s;
+}
+```
+机器必须完成：
+- 跳转到被调用函数`mult2`
+- 执行完后返回调用点（即`call`之后）
+- 确保返回地址、寄存器状态、参数都正确
+```asm
+0000000000400540 <multstore>:
+  400540: push %rbx        # 保存 %rbx，防止被覆盖
+  400541: mov  %rdx,%rbx   # 保存 dest 指针到 %rbx
+  400544: call 400550 <mult2>  # 调用 mult2(x, y)
+  400549: mov  %rax,(%rbx) # 将 mult2 的返回值写入 *dest
+  40054c: pop  %rbx        # 恢复寄存器
+  40054d: ret              # 返回调用者
+
+0000000000400550 <mult2>:
+  400550: mov  %rdi,%rax   # s = a
+  400553: imul %rsi,%rax   # s *= b  (即 s = a*b)
+  400557: ret              # 返回
+```
+#newpara()
+
+*函数调用控制机制（Control Flow）*
+- *`call` 指令*
+  ```asm
+  call Label
+  ```
+  - *压栈返回地址*（return address）：
+    - 即下一条指令（`call`后的那条）所在地址
+  - *跳转*到被调函数的起始地址
+  - 举例：
+    ```asm
+    400544: call 400550 <mult2>
+    400549: mov  %rax,(%rbx)
+    ```
+    这意味着：
+    - 把返回地址 `0x400549` 压入栈
+    - 跳转到地址 `0x400550` 执行 `mult2`
+- *`ret` 指令*
+  ```asm
+  ret
+  ```
+  - *弹出栈顶地址*（刚才被 `call` 压入的返回地址）
+  - *跳转*回该地址（继续执行主调函数）
+  - 举例：
+    ```asm
+    400557: ret
+    ```
+    这意味着：
+    - 从栈顶弹出返回地址（`0x400549`）
+    - 跳转回 `0x400549` 继续执行 `multstore` 中的下一条指令
+    ```asm
+    RIP = *RSP;
+    RSP = RSP + 8;
+    ```
+
+栈的状态变化（控制流图）
+```
+Before CALL (in multstore):
+
+%rsp → [ ... old stack ... ]
+        ↑
+        | (push return addr)
+        |
+After CALL:
+%rsp → [ 0x400549 (return address) ]
+        ↑
+        |-- %rsp points to this (top)
+        ↓
+        低地址
+        ------------------------------
+        mult2 function code executes
+        ------------------------------
+        ↑
+        RET pops this value → jumps to 0x400549
+```
+假设
+```c
+multstore(3, 5, &res);
+```
+- 函数调用前
+  - #three-line-table[
+      | 寄存器    | 含义        | 值（示例）                      |
+      | ------ | --------- | -------------------------- |
+      | `%rdi` | 第1参数 x    | `3`                        |
+      | `%rsi` | 第2参数 y    | `5`                        |
+      | `%rdx` | 第3参数 dest | 地址 `0x7fffffffdc00`        |
+      | `%rsp` | 栈顶指针      | `0x7fffffffdbe0`           |
+      | `%rip` | 指令地址      | 指向 `400544` (`call mult2`) |
+      | `%rbx` | 通用寄存器     | 保存旧值（未定）                   |
+    ]
+- 执行 `call 400550 <mult2>` 的内部过程
+  - 执行 `call` 指令
+    - 压栈返回地址
+      - `return address = 0x400549`（call 下一条指令地址）
+      - `rsp -= 8`
+      - `[rsp] = 0x400549`
+    - 跳转到函数 `mult2` 的入口地址
+      - `%rip = 0x400550`
+    - 并且寄存器变化如下：
+      #three-line-table[
+        | 寄存器    | 调用前                        | 调用后                                   |
+        | ------ | -------------------------- | ------------------------------------- |
+        | `%rsp` | `0x7fffffffdbe0`           | `0x7fffffffdbe0 - 8 = 0x7fffffffdbe8` |
+        | `%rip` | `0x400544`                 | `0x400550`（跳转到 mult2 开头）              |
+        | `%rdi` | `3`                        | `3`（保持参数 x）                           |
+        | `%rsi` | `5`                        | `5`（保持参数 y）                           |
+        | `%rbx` | 指向 dest (`0x7fffffffdc00`) | 保持（caller-saved）                      |
+      ]
+  - 在 mult2 内部执行
+    ```asm
+    400550: mov  %rdi,%rax   # rax = rdi = 3
+    400553: imul %rsi,%rax   # rax = rax * rsi = 3 * 5 = 15
+    400557: ret              # 返回
+    ```
+    - `%rax ← 15`
+    - `%rip = 0x400557`
+    - `栈顶 [rsp] = 0x400549`
+  - 执行 ret 指令
+    - ret 自动完成：
+      - 从栈顶读取返回地址：`ret_addr = [rsp] = 0x400549`
+      - 弹栈：`rsp = rsp + 8`
+      - 跳转回返回地址：`rip = ret_addr = 0x400549`
+    - 同时：
+      - `%rip = 0x400549`
+      - 程序返回到`mov %rax,(%rbx)`（在`multstore`中）
+#three-line-table[
+  | 阶段       | 指令            | %rsp 变化            | %rip 变化       | 栈内容                | 备注           |
+  | -------- | ------------- | ------------------ | ------------- | ------------------ | ------------ |
+  | 调用前      | (call 前)      | `0x7fffffffdbe0`   | `0x400544`    | 空闲                 | 准备调用         |
+  | 执行 call  | `call 400550` | → `0x7fffffffdbe8` | → `0x400550`  | `[rsp] = 0x400549` | 压栈返回地址并跳转    |
+  | 执行 mult2 | …             | 保持不变               | 跑到 `0x400557` | 栈内容不变              | mult2 内执行    |
+  | 执行 ret   | `ret`         | → `0x7fffffffdbe0` | → `0x400549`  | 弹出返回地址             | 返回 multstore |
+]
+
 ==== Passing data
+
+在过程调用中，除了控制转移（上一节的`call/ret`）之外，编译器还必须解决：
+- 如何把参数传递给被调函数（arguments）
+- 如何返回结果（return value）
+- 何时需要借助栈来传递数据
+
+*寄存器参数传递规则（x86-64 System V ABI）*
+- 在 x86-64 Linux / macOS ABI 中：
+  #three-line-table[
+    | 参数顺序  | 使用寄存器  | 说明                  |
+    | ----- | ------ | ------------------- |
+    | 第1个参数 | `%rdi` | (Destination Index) |
+    | 第2个参数 | `%rsi` | (Source Index)      |
+    | 第3个参数 | `%rdx` | (Data)              |
+    | 第4个参数 | `%rcx` | (Counter)           |
+    | 第5个参数 | `%r8`  |       \              |
+    | 第6个参数 | `%r9`  |        \             |
+    | 其余参数  | 栈上传递   | 超过 6 个参数时，继续往栈上压    |
+  ]
+- 返回值放在 `%rax` 寄存器中
+  - 函数返回值 → `%rax`
+  - 若返回结构体（多个值），则特殊规则（暂略）
+*multstore / mult2 数据流分析*
+```
+Caller: multstore(x=3, y=5, dest=&res)
+-------------------------------------------------------
+%rdi = 3       (x)
+%rsi = 5       (y)
+%rdx = &res    (dest)
+call mult2
+  ↓
+Callee: mult2(a=3, b=5)
+-------------------------------------------------------
+%rdi = 3       (a)
+%rsi = 5       (b)
+mov %rdi,%rax  → %rax = 3
+imul %rsi,%rax → %rax = 15
+ret → %rax = 15, 返回到 multstore
+  ↓
+Back to multstore
+-------------------------------------------------------
+%rax = 15
+mov %rax,(%rbx) → *dest = 15
+```
+multstore 调用 mult2 的完整数据流
+- 函数入口（multstore）
+  ```asm
+  400540: push %rbx        # 保存 %rbx（被调者保存寄存器）
+  400541: mov  %rdx,%rbx   # 把 dest（在 %rdx）保存到 %rbx
+  400544: call 400550 <mult2>  # 调用 mult2(x,y)
+  ```
+  #three-line-table[
+    | 寄存器    | 含义       | 值              |
+    | ------ | -------- | -------------- |
+    | `%rdi` | x        | 3              |
+    | `%rsi` | y        | 5              |
+    | `%rdx` | dest     | 0x7fffffffdc00 |
+    | `%rbx` | dest（复制） | 0x7fffffffdc00 |
+  ]
+- 调用 mult2
+  ```asm
+  400550: mov  %rdi,%rax    # rax = a = 3
+  400553: imul %rsi,%rax    # rax = rax * b = 3*5=15
+  400557: ret               # 返回，结果在 %rax
+  ```
+  `%rax = 15`
+- multstore 接收返回值
+  ```asm
+  400549: mov  %rax,(%rbx)  # *dest = rax (即 *dest = 15)
+  40054c: pop  %rbx
+  40054d: ret
+  ```
+  #three-line-table[
+    | 寄存器      | 含义      | 值              |
+    | -------- | ------- | -------------- |
+    | `%rbx`   | dest 地址 | 0x7fffffffdc00 |
+    | `%rax`   | 返回值（t）  | 15             |
+    | `(%rbx)` | \*dest   | 15（写入内存）       |
+  ]
+
 ==== Managing local data
+
+*管理局部数据 / 栈帧机制*
+
+*为什么要有栈帧（Stack Frame）*
+- 在支持*递归*的语言（如 C、Pascal、Java）中，
+  - 同一个函数可以多次被调用、并且每次调用都要有独立的数据副本。
+  - 因此，程序需要一种机制来：
+    - 保存函数调用的上下文状态（arguments、locals、return address）
+    - 能够在函数返回后恢复上一级状态
+    - 确保函数是 reentrant（可重入的）
+  - 这就是——栈帧（Stack Frame）
+- 栈帧（Stack Frame）的职责
+  - 每次调用函数，系统会在栈上创建一个新的“帧（frame）”，
+它是该函数调用的局部工作区。
+- 一个栈帧典型包含：
+  #three-line-table[
+    | 区域        | 内容                     | 说明                     |
+    | --------- | ---------------------- | ---------------------- |
+    | *返回地址*  | 调用者下一条指令的地址            | `call` 自动压栈            |
+    | *旧帧指针*  | 上一函数的 `%rbp`           | 用于恢复调用者的栈环境            |
+    | *局部变量*  | 函数内部定义的变量              | 通常存放在 `%rsp` 以下        |
+    | *临时空间*  | 计算或寄存器溢出值              | 临时保存中间结果               |
+    | *保存寄存器* | 需要保护的 callee-saved 寄存器 | 例如 `%rbx`, `%r12–%r15` |
+  ]
+*栈帧的建立与释放过程*
+- 栈帧的生成与销毁由两部分组成：
+  - 函数入口（prologue，进入函数）
+    ```asm
+    push %rbp          # 保存旧帧指针
+    mov  %rsp, %rbp    # 建立新的帧指针
+    sub  $N, %rsp      # 为局部变量分配空间
+    ```
+  - 函数退出（epilogue，离开函数）
+    ```asm
+    leave              # 等价于 mov %rbp, %rsp; pop %rbp
+    ret                # 弹出返回地址并跳转
+    ```
+举例：函数嵌套调用（Call Chain）
+```c
+void yoo() {
+    who();
+}
+void who() {
+    amI();
+}
+void amI() {
+    amI();
+}
+```
+调用链：
+```
+yoo() → who() → amI() → amI() → ...
+```
+每进入一次函数，就会建立一个新的 栈帧，形成“栈帧链”：
+```
+高地址 ↑
+│
+│ yoo() Frame
+│--------------------
+│ who() Frame
+│--------------------
+│ amI() Frame (第1次)
+│--------------------
+│ amI() Frame (第2次)
+│--------------------
+│ amI() Frame (第3次)
+│-------------------- ← 栈顶 (%rsp)
+低地址 ↓
+```
+
+#newpara()
+
+*x86-64 / Linux（SysV ABI） 的栈帧结构*
+- 一张“从上到下”的栈帧速览（当前函数）
+  ```
+  ...                    ← 更高地址（调用者更老的帧）
+  ┌───────────────────────────────┐
+  │ 参数 7+（给“将要调用”的函数） │  ← Argument build area（仅当要放栈参数时）
+  ├───────────────────────────────┤
+  │ 返回地址（call 自动压入）      │  ← 属于调用者帧的顶部
+  ├───────────────────────────────┤
+  │ 旧 %rbp（可选）                │  ← 建帧指针风格才有
+  ├───────────────────────────────┤
+  │ Saved Registers（被调者保存寄存器） │  ← 如 %rbx, %r12–%r15
+  │ Local Variables / Temporaries │  ← 函数局部变量、临时存储区
+  ├───────────────────────────────┤
+  │ Argument build area（可选）   │  ← 给“将要调用”的函数放参数用
+  └───────────────────────────────┘
+  ...                    ← 更低地址（栈顶向下）
+  ```
+  - `%rsp` 指向当前栈顶
+  - 如使用帧指针，`%rbp` 指向“旧 `%rbp`”之上，作为当前帧的基准
+- *调用协定*：谁保存什么（寄存器）
+  - 调用者保存 (caller-saved)：`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9` `%r10` `%r11`（要跨调用保留就自己先保存）
+  - 被调者保存 (callee-saved)：`%rbx` `%rbp` `%r12` `%r13` `%r14` `%r15`（被调函数若用到，进函数时保存、返回前恢复）
+  - 返回值：`%rax`
+  - 前 6 个整数/指针参数：`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9`；第 7 个起放在调用者栈的 argument-build 区。
+- *栈对齐与“构建参数区”*
+  - 对齐规则：在执行 `call` 之前，要求 `%rsp 16` 字节对齐。`call` 会再压 8 字节返回地址，使被调函数入口处 `%rsp ≡ 8 (mod 16)`（ABI 规定）
+  - 因此调用前，调用者常会在栈上预留/调整若干字节：
+    - 放第 7 个及以后的参数
+    - 凑齐对齐（即使没有多余参数也可能 `sub $8,%rsp` 之类）
+  - Linux SysV 无“home space”（不像 Windows x64 固定为寄存器形参留 32B 影子空间）
+- *可选/特殊区域*
+  - 旧 `%rbp`（帧指针）：优化编译常用 frame-pointer-omission（省略 `%rbp`），直接用 `%rsp`+偏移访问局部变量，此时没有“旧 `%rbp`”槽。
+  - Red Zone（红区）：在 SysV/Linux，`%rsp` 下方 128 字节可供叶子函数（不调用别的函数）临时使用，无需 `sub` 栈空间；内核/中断不会破坏它（信号处理栈切换也保证安全）。但调用别的函数就不能依赖红区
+  - 可变参数函数 (variadic)：被调者通常在自己的栈帧里建立寄存器保存区，把到达的寄存器实参溢出到栈，供 `va_arg` 使用
+
+例子
+```c
+long incr(long *p, long val) {
+    long x = *p;
+    long y = x + val;
+    *p = y;
+    return x;
+}
+
+long call_incr() {
+    long v1 = 15213;
+    long v2 = incr(&v1, 3000);
+    return v1 + v2;
+}
+```
+对应的汇编（GCC -O0）：
+```asm
+call_incr:
+    subq  $16, %rsp
+    movq  $15213, 8(%rsp)
+    movl  $3000, %esi
+    leaq  8(%rsp), %rdi
+    call  incr
+    addq  8(%rsp), %rax
+    addq  $16, %rsp
+    ret
+
+incr:
+    movq  (%rdi), %rax
+    addq  %rax, %rsi
+    movq  %rsi, (%rdi)
+    ret
+```
+逐步状态
+- 进入 `call_incr`（尚未执行函数体）
+  ```
+  地址高 ↑
+  [S+?]   …（更早的帧）
+  [S]     返回到 caller 的地址   ← %rsp = S
+  地址低 ↓
+  ```
+- `subq $16, %rsp` —— 为本函数局部留 16B
+  ```
+  地址高 ↑
+  [S]     返回地址（属于 caller 帧）
+  [S-8]   （未用）             ← %rsp+8
+  [S-16]  （未用）             ← %rsp = S-16
+  地址低 ↓
+  ```
+  这 16 字节是 `call_incr` 的当前帧。`8(%rsp)` 用来放 `v1`，`(%rsp)` 这 8 字节暂时不用。
+- `movq $15213, 8(%rsp)` —— 写入 `v1`
+  ```
+  [S]     返回地址
+  [S-8]   15213 (= v1)         ← %rsp+8
+  [S-16]  （未用）             ← %rsp
+  ```
+- `movl $3000, %esi` （参数2：`val`）
+  - 对 32 位寄存器 `%esi` 的写入会自动把 `%rsi` 的高 32 位清零。现在：`%rsi = 3000`
+- `leaq 8(%rsp), %rdi` （参数1：`&v1`）
+  - 只是地址计算，不访问内存。现在：`%rdi = S-8`（指向 `v1`）
+- `call incr` —— 调用 `incr`
+  - 压栈返回地址，跳转到 `incr`，建立 `incr` 的栈帧（无局部变量，无保存寄存器）
+    - 调用瞬间的栈变化（仅在 `incr` 执行期间存在的返回槽）：
+    ```
+    地址高 ↑
+    [S]      返回到 caller
+    [S-8]    15213 (= v1)
+    [S-16]   （未用）
+    [S-24]   返回到 call_incr 内的地址（call 下一条）  ← %rsp = S-24（进入 incr）
+    地址低 ↓
+    ```
+- 在 `incr` 内部
+  - `movq (%rdi), %rax` —— 取 `x = *p`
+    - 从地址 `S-8` 读 `15213` 到 `%rax`
+    - 此时：`%rax = 15213`（这就是将来要返回的 `v2`）
+  - `addq %rax, %rsi` —— `y = x + val`
+    - `%rsi = 3000 + 15213 = 18213`
+  - `movq %rsi, (%rdi)` —— `*p = y`
+    - 把 `18213` 写回地址 `S-8`（更新 `v1`）
+    - 此刻，`call_incr` 的栈槽里 `v1` 已经变成 `18213`
+  - `ret` —— 返回 `call_incr`
+    - 从栈顶弹出返回地址 S-24 处的 8 字节到 `%rip`，跳回 `call_incr` 的 call 下一条
+    - 同时 `%rsp` 恢复为 S-16
+    - 返回值在 `%rax`，仍是 `15213`（旧的 `x`）
+  - `ret` 后栈恢复为：
+    ```
+    地址高 ↑
+    [S]     返回到 caller
+    [S-8]   18213 (= v1 已更新)
+    [S-16]  （未用）             ← %rsp
+    地址低 ↓
+    ```
+- `addq 8(%rsp), %rax` —— 计算 `v1 + v2`
+  - 读取 `8(%rsp)`（即 S-8）现在是 `18213`
+  - `%rax` 里是 `v2 = 15213`
+  - 相加后 `%rax = 15213 + 18213 = 33426`
+- `addq $16, %rsp` —— 释放栈空间
+  - `%rsp` 恢复为 S
+- `ret` —— 返回 caller
+  - 弹出 S 处的返回地址到 `%rip`，回到 `call_incr` 的调用者
+  - 返回值在 `%rax`，是 `33426`
+
+*寄存器保存约定（Register Saving Conventions）*
+- 寄存器保存约定（Register Saving Conventions），是过程调用（Procedure Call）最重要的“协议之一”，即 谁负责保存寄存器内容
+- 问题背景：寄存器会被谁改？
+  ```asm
+  yoo:
+      movq $15213, %rdx   # yoo 想暂存在 %rdx
+      call who
+      addq %rdx, %rax
+      ret
+
+  who:
+      subq $18213, %rdx   # who 也用 %rdx 做临时计算
+      ret
+  ```
+  问题：`who`（被调者）修改了 `%rdx`，返回后 `yoo` 继续用 `%rdx`，但值已经变了 → 出错！
+  - 我们需要约定（Conventions）来协调双方：
+    - 哪些寄存器由调用者在调用前保存；
+    - 哪些寄存器由被调者在使用前保存。
+- 两类寄存器保存约定
+  #three-line-table[
+    | 名称               | 又称                    | 谁来保存                       | 用法举例        | 常见寄存器                                        |
+    | ---------------- | --------------------- | -------------------------- | ----------- | -------------------------------------------- |
+    | *Caller-saved* | call-clobbered（调用者负责） | 调用者调用前若想保留值，先自己 `push` 到栈上 | 临时寄存器、参数寄存器 | `%rax %rcx %rdx %rsi %rdi %r8 %r9 %r10 %r11` |
+    | *Callee-saved* | call-preserved（被调者负责） | 被调者如果想改，就先保存旧值、用完再恢复       | 需在多个函数间保持   | `%rbx %rbp %r12 %r13 %r14 %r15`              |
+  ]
+
+*x86-64 Linux 寄存器使用规范（Register Usage Convention）*
+- x86-64 一共有 16 个通用寄存器：
+  ```
+  %rax %rbx %rcx %rdx %rsi %rdi
+  %rbp %rsp
+  %r8  %r9  %r10 %r11 %r12 %r13 %r14 %r15
+  ```
+  但它们在 函数调用 里职责不同：
+  - 有的用于*传参*
+  - 有的保存*返回值*
+  - 有的用作*临时寄存器*
+  - 有的要在*调用间保持不变*
+- Caller-saved 区
+  #three-line-table[
+    | 寄存器                                  | 功能             | 特性           |
+    | ------------------------------------ | -------------- | ------------ |
+    | *%rax*                             | 返回值；中间计算结果     | Caller-saved |
+    | *%rdi, %rsi, %rdx, %rcx, %r8, %r9* | 前 6 个参数        | Caller-saved |
+    | *%r10, %r11*                       | 临时使用寄存器（中间计算用） | Caller-saved |
+  ]
+- Callee-saved 区（x86-64 Linux）
+  #three-line-table[
+    | 寄存器             | 功能               | 特性              |
+    | --------------- | ---------------- | --------------- |
+    | *%rbx*        | 常用临时保存寄存器        | Callee-saved    |
+    | *%r12 – %r15* | 临时保存寄存器（函数可自由使用） | Callee-saved    |
+    | *%rbp*        | 传统帧指针（有时省略）      | Callee-saved    |
+    | *%rsp*        | 栈指针（必须恢复原值）      | 特殊 Callee-saved |
+  ]
+
+```
+───────────────────────────────
+Caller-saved (volatile)
+───────────────────────────────
+%rax   Return value
+%rdi   Arg1
+%rsi   Arg2
+%rdx   Arg3
+%rcx   Arg4
+%r8    Arg5
+%r9    Arg6
+%r10   Temporary
+%r11   Temporary
+───────────────────────────────
+Callee-saved (non-volatile)
+───────────────────────────────
+%rbx   Must restore
+%rbp   Must restore (frame ptr)
+%r12   Must restore
+%r13   Must restore
+%r14   Must restore
+%r15   Must restore
+%rsp   Must restore to original
+───────────────────────────────
+```
+
+#note(subname: [小结：寄存器使用惯例])[
+  - 程序寄存器组是唯一能被所有过程共享的资源。
+    - 虽然在给定时刻只能有一个过程是活动的， 但是我们必须保证当一个过程（调用者）调用另一个过程（被调用者）时，被调用者不会覆盖某个调用者稍后会使用的寄存器的值。
+  - X86-64采用了一组统一的寄存器使用惯例，所有的过程都必须遵守，包括程序库中的过程。
+    - 根据惯例，寄存器％rbx, %rbp和％r12-%r15被划分为被调用者保存寄存器。当过程P调用过程Q时，Q必须保存这些寄存器的值，保证它们的值在Q返回到P时与Q被调用时是一样的。
+    - 所有其他的寄存器，除了栈指针%rsp，都分类为调用者保存寄存器。这就意味着任何函数都能修改它们。
+]
+
 === Illustration of Recursion
+
+*举例*：递归 popcount的 C 代码如何映射到 x86-64 汇编
+```c
+long pcount_r(unsigned long x) {
+    if (x == 0) return 0;
+    else return (x & 1) + pcount_r(x >> 1);
+}
+```
+汇编（System V；x→%rdi，返回值→%rax）：
+```asm
+pcount_r:
+    movl  $0, %eax        # 先把返回寄存器清零（32 位写会清 %rax 高 32 位）
+    testq %rdi, %rdi      # x == 0 ?
+    je    .L6             # 是的话跳到返回
+
+    pushq %rbx            # 保存 callee-saved，下面要用 %rbx
+    movq  %rdi, %rbx      # %rbx = x
+    andl  $1, %ebx        # %rbx = x & 1  （低位比特）
+    shrq  %rdi            # %rdi = x >> 1 （递归实参）
+    call  pcount_r        # 递归调用，返回值在 %rax
+    addq  %rbx, %rax      # %rax += (x & 1)
+    popq  %rbx            # 恢复 callee-saved
+.L6:
+    rep;  ret             # 返回（rep 前缀是性能/预测小技巧）
+```
+- 终止条件（Terminal Case）
+  #three-line-table[
+    | 寄存器 | 使用 | 类型 |
+    | ---- | ---- | -- |
+    | `%rdi` | `x` | Argument |
+    | `%rax` | 返回值 | Return Value |
+  ]
+- 寄存器保存（Register Save）
+  #three-line-table[
+    | 寄存器 | 使用       | 类型            |
+    | ---- | -------- | ------------- |
+    | `%rdi` | `x`       | Argument      |
+  ]
+- 递归调用前的准备（Call Setup）
+  #three-line-table[
+    | 寄存器 | 使用       | 类型            |
+    | ---- | -------- | ------------- |
+    | `%rdi` | `x >> 1`  | Argument      |
+    | `%rbx` | `x & 1`   | Temporary, Callee-saved     |
+  ]
+- 递归调用（Call），合并结果（Result Combine）
+  #three-line-table[
+    | 寄存器 | 使用       | 类型            |
+    | ---- | -------- | ------------- |
+    | `%rbx` | `x & 1`   | Temporary, Callee-saved     |
+    | `%rax` | 返回值     | Return Value  |
+  ]
+- 完成返回（Completion）
+  #three-line-table[
+    | 寄存器 | 使用   | 类型          |
+    | ---- | ---- | ----------- |
+    | `%rax` | 返回值 | Return Value |
+  ]
+
+*递归在汇编层面的核心特点*
+- 在机器层面，递归调用与普通函数调用没有任何“特别的机制”。它完全依赖以下三样东西实现：
+  - 栈帧 (stack frame) ：每次调用分配独立的一块内存区域，用于保存局部变量、参数、返回地址
+  - 寄存器保存约定 (register saving conventions) ：保证不同函数实例互不干扰
+  - 栈的 LIFO 结构 ：后调用的函数先返回，完美契合递归调用顺序
+- 栈帧的作用
+  - 每一次调用都有独立的：
+    - 返回地址（由 call 自动 push）
+    - 保存的寄存器（如 %rbx、%rbp）
+    - 局部变量或临时值
+  - 这就是为什么递归可以安全进行多层嵌套而互不干扰。每一层的“函数状态”都被保存在独立的帧上。
+- Register Saving Conventions 的保障作用
+  - 调用约定要求：
+    - caller-saved 寄存器：调用者必须在 call 前自己保存
+    - callee-saved 寄存器：被调者必须在用之前 push，用完 pop 恢复
+  - 因此：
+    - 每一层 pcount_r 都可以安全使用 `%rbx` 保存
+    - 不会破坏上层的 `%rbx` 值。
+  #three-line-table[
+    | 特性            | 机制                          | 作用            |
+    | ------------- | --------------------------- | ------------- |
+    | *每次调用独立栈帧*  | `call` + `%rsp` 调整          | 隔离局部状态        |
+    | *寄存器保存规则*   | caller-saved / callee-saved | 避免破坏其他调用的寄存器值 |
+    | *返回地址入栈*    | `call` 指令自动 `push`          | 保证函数返回正确      |
+    | *栈 LIFO 模式* | `push` / `pop`              | 实现递归自然的回退顺序   |
+    | *互相递归也安全*   | 各自维护返回指针                    | 可自由调用         |
+  ]
