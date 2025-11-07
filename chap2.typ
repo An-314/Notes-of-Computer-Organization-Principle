@@ -2389,3 +2389,666 @@ pcount_r:
     | *栈 LIFO 模式* | `push` / `pop`              | 实现递归自然的回退顺序   |
     | *互相递归也安全*   | 各自维护返回指针                    | 可自由调用         |
   ]
+
+=== Summary
+
+- 栈是过程调用的天然数据结构
+  #three-line-table[
+    | 特性       | 解释                                   |
+    | -------- | ------------------------------------ |
+    | LIFO     | 最后调用的函数最先返回（与调用顺序相反）                 |
+    | 生命周期自然匹配 | 函数退出后数据不再需要                          |
+    | 易于实现     | `pushq`, `popq`, `subq`, `addq` 操作简单 |
+    | 支持递归     | 每次调用有独立的帧                            |
+  ]
+- 栈帧（Stack Frame）内容回顾
+  ```
+  High Address
+  | Arguments beyond 6th |
+  | Return Address       | <- pushed by call
+  | Old %rbp (optional)  | <- frame pointer
+  | Saved registers      | <- if callee saves
+  | Local variables      |
+  | Temp space / spill   |
+  | Argument build area  | <- for calling other functions
+  Low Address (%rsp)
+  ```
+- 什么时候需要开栈帧
+  - 编译器根据函数行为决定：
+    #three-line-table[
+      | 情况                    | 是否分配栈帧？                 |
+      | --------------------- | ----------------------- |
+      | 有局部变量                 | 必须                    |
+      | 需要 spill 寄存器          | 必须                    |
+      | 需要保存 callee-saved 寄存器 | 必须                    |
+      | 调用其他函数且需准备参数空间        | 多数情况                  |
+      | 完全在寄存器中能算完，无局部变量      | 不需要（leaf function 优化） |
+    ]
+
+== Advanced Topics
+
+=== Memory Layout
+
+*x86-64 / Linux 进程的虚拟内存总体结构（从高地址到低地址）*
+- 虚拟地址空间是“线性的”，常见的高地址 → 低地址排列（64 位进程，用户态）：
+  ```
+  高地址
+  0x00007fff ffff ffff  ← 通常栈顶 (用户空间高端)
+    ↑
+    |  stack (grows down)        # 例如默认 ~8 MB（可变）
+    |
+    |  (随机化，ASLR)
+    |
+    |  mmap() 区 / shared libs    # 动态映射（.so），以及 mmap 分配的大块内存
+    |
+    |  heap (brk) (grows up)      # malloc 小块通常来自这里
+    |
+  0x0000000000600000  ← 数据段（.data/.bss/.rodata）
+  0x0000000000400000  ← 文本段（.text，程序代码）
+  低地址
+  ```
+- 各段的用途与典型特性
+  - Text (.text) — 程序机器指令
+    - 存放可执行代码、函数体。通常是*只读并可执行*（RX）
+    - 位于较低地址（例如 0x400000）
+  - Data (.data / .bss / .rodata) — 静态数据
+    - `.data`：已初始化的全局/静态变量（可读写）
+    - `.bss`：未初始化或为 0 的全局/静态变量（运行时占据空间）
+    - `.rodata`：只读常量（例如字符串常量）
+    - `global`、`big_array`（如果是静态分配）就在这里
+  - Heap（堆） — 动态分配内存区（malloc/new）
+    - 由 `brk()`/`sbrk()`（传统）或者 `mmap()` 分配
+    - `malloc(), calloc(), free()` 等内存分配函数管理堆空间
+    - 小块分配器通常从 `brk` 增长的区域拿内存；很大的分配器可能直接用 `mmap()` 映射独立区域（特别是几 MB/GB 的分配）
+    - 堆向高地址增长（grows up）
+  - mmaps / Shared Libraries（动态库 & 内存映射区）
+    - `mmap()` 返回内存映射，位置通常在堆和栈之间的地址空间；动态库（.so）也映射到这里
+    - 大对象（如 4 GB）很可能用 `mmap()` 而不是扩展 `brk`
+  - Stack（栈） — 运行时栈（函数调用、局部变量）
+    - 默认大小通常是 8 MB（Linux 线程默认），可以通过 ulimit -s 或 pthread 属性改变
+    - 栈从高地址向低地址增长
+    - 内核/运行时会在栈底附近放保护页（guard page）来检测栈溢出
+    - x86-64 下有个 128 字节的 Red Zone（在 leaf 函数中可用，无需调整栈指针）
+  - Kernel / Reserved — 内核态地址（不可访问，位于更高地址）
+
+=== Buffer Overflow
+
+==== Vulnerability
+
+*缓冲区溢出（Buffer Overflow）*
+- 缓冲区是程序用来存放数据的内存区域，通常是数组或字符串
+- 程序在内存（通常是栈）上为一个“缓冲区”分配了固定大小（比如`char buf[64]`）
+- 如果程序把超过这个大小的数据写入（例如没有检查长度的 `strcpy(buf, user_input)`），就会写出缓冲区边界，覆盖相邻内存
+- 在栈上，这相邻内存往往包括：局部变量、被保存的寄存器、旧的帧指针、返回地址等
+- 覆盖返回地址会导致被调用函数执行`ret`时跳到攻击者控制的地址，从而执行任意代码或改变控制流（最严重的后果）
+
+*典型攻击思路*
+- 历史上的利用通常包含三个阶段（高层次描述）：
+  - 触发写越界：利用不做边界检查的函数（例如早期 `strcpy`、`gets`）把超长输入写入栈上的缓冲区
+  - 覆盖控制数据：把返回地址或函数指针覆盖成攻击者选择的值
+  - 取得执行：当代码 `ret` 或通过被改动的指针调用函数时，控制流被改变；攻击者希望跳到“有效的可执行代码”（比如攻击者在内存中放的 shellcode），或者借助已有的可执行片断（ROP）进行更复杂的攻击
+- 为什么历史上会发生（根源）
+  - 早期 C 标准库有不少不检查边界的函数（`strcpy, sprintf, gets` 等）
+  - 程序员对输入没有足够验证或未考虑恶意输入。
+  - 系统缺少运行时防护（当时没有 NX、ASLR、Stack Canary 等）
+  - 结果就是：攻击者可以向网络服务发送精心构造的数据并改变服务器的行为
+*现代常见防护措施（编译器 / OS / 运行时）*
+- Stack Canaries（栈金丝雀）
+  - 在返回地址之前插入一个随机值（canary）。函数返回前检查 canary 是否被修改，若被改则中止程序。可阻止简单的返回地址覆盖。
+  - 编译器支持：例如 -fstack-protector / -fstack-protector-strong。
+- NX / DEP（Non-eXecutable / Data Execution Prevention）
+  - 把栈/堆等数据区标记为不可执行；即便攻击者把 shellcode 写入数据区，也不能直接执行。
+  - 会促使攻击者使用更复杂的技术（如 ROP）。
+- ASLR（Address Space Layout Randomization）
+  - 随机化堆、栈、库、可执行文件的基地址，使“硬编码地址”攻击更难。
+  - 提高攻击难度，需要更多漏洞信息才能成功利用。
+- Position Independent Executables / PIE
+  - 让可执行文件本身也支持随机化（配合 ASLR 更有效）
+- Control-Flow Integrity（CFI）与 Shadow Stack
+  - CFI：在运行时限制可能的控制流转移
+  - Shadow Stack：保存返回地址的副本，防篡改检查。两者均是高级防护
+- 堆/栈保护库与沙箱
+  - 例如使用现代内存安全机制或运行在被隔离的环境中运行不受信任代码
+- 编译器 / 静态分析 / 动态检查工具
+  - AddressSanitizer（ASan）用于检测缓冲区溢出等运行时错误
+  - Valgrind、UndefinedBehaviorSanitizer 等也能帮助找到问题
+
+*数组越界示例*
+```c
+typedef struct {
+    int a[2];
+    double d;
+} struct_t;
+
+double fun(int i) {
+    volatile struct_t s;
+    s.d = 3.14;
+    s.a[i] = 1073741824; /* Possibly out of bounds */
+    return s.d;
+}
+```
+```
+fun(0) -> 3.1400000000
+fun(1) -> 3.1400000000
+fun(2) -> 3.1399998665
+fun(3) -> 2.0000006104
+fun(6) -> Stack smashing detected
+fun(8) -> Segmentation fault
+```
+内存布局：`struct_t`在内存中大概是这样（x86-64）：
+#three-line-table[
+  | 字节偏移 | 内容   |
+  | ---- | ---- |
+  | 0–3  | `a[0]` |
+  | 4–7  | `a[1]` |
+  | 8–15 | `d`    |
+]
+- `fun(0)`
+  - `a[0] = big int`合法，不影响 `d`
+  - 返回 3.14
+- `fun(1)`
+  - 写 `a[1]`，也在结构体内部
+  - 返回 3.14
+- `fun(2)`
+  - `a[2]` 就等价于越界写 4 字节，正好覆盖 `d` 的低 4 字节
+  - 所以 `d` 原本 3.14 的 bit 被部分篡改，变成一个“接近但不一样”的 double：
+  - 返回约 3.1399998665
+  - 这是典型数据破坏但程序仍继续运行的情况
+- `fun(3)`
+  - `a[3]` 超过结构体 8 字节，再越界 4 字节
+  - 覆盖到double 的高 4 字节（或栈上的下一个变量/地址）
+  - 返回约 2.0000006104
+- `fun(4) / fun(6) / fun(8)`
+  - 继续写，会破坏栈上的其它关键数据：
+    - saved registers：`%rbp`、返回地址等
+    - stack canary（开了 `-fstack-protector` 会检测）：
+      - `fun(6)` 时检测到 canary 被改，报错“Stack smashing detected”
+    - return address：
+      - `fun(8)` 时覆盖返回地址，导致 `ret` 跳到非法地址，触发“Segmentation fault”
+  - `fun(8)` 有时又正常了，因为越界写到了“别的安全区域之外”，没有破坏关键数据，但这是偶然的
+  #three-line-table[
+    | 情况      | 发生了啥                | 返回值情况                   |
+    | ------- | ------------------- | ----------------------- |
+    | i = 0,1 | 正常                  | 3.14                    |
+    | i = 2   | 覆盖 double 低 4 bytes | 3.1399998665            |
+    | i = 3   | 覆盖 double 全部 bytes  | 2.0000006104            |
+    | i = 4   | 覆盖到别的栈内容            | Segmentation fault      |
+    | i = 6   | 覆盖 stack canary     | stack smashing detected |
+    | i = 8   | 越界到别处但没打到要害         | 又正常了（偶然）                |
+  ]
+
+*Buffer Overflow 是个“大问题”*
+- 当程序试图写入超过数组（buffer）容量的内容时，就发生了溢出：
+  ```c
+  char buf[8];
+  gets(buf);   // 无边界检查
+  ```
+  输入超过 8 字节 → 写到 buf 之外 → 覆盖栈上的其他数据（局部变量、返回地址、canary……）
+  - 可怕之处在于：编译器不会阻止它，只是“未定义行为”
+- 为什么它如此危险？
+  - 因为它会破坏程序控制流
+    ```
+    [buf] [saved rbp] [return address]
+    ```
+    如果攻击者覆盖了 return address
+    ```
+    程序返回 → 跳到攻击者控制的位置 → 执行恶意代码
+    ```
+    这就是所谓的：“代码注入攻击”（Code Injection Attack）
+    - Return-to-Shell（开始一个 sh）
+    - Return-to-libc（跳到 system("/bin/sh")）
+    - ROP（Return-Oriented Programming 链式攻击）
+- 最常见的 buffer overflow 类型：栈溢出（stack smashing）
+  ```c
+  char name[16];
+  gets(name);  // 用户输入无限长
+  ```
+  用户输入：
+  ```
+  AAAAAAAAAAAAAAAAAAAAAAAABBBBCCCCDDDD...<攻击载荷>
+  ```
+  写到：局部变量，栈 canary，保存寄存器，返回地址；溢出返回地址后， 程序被攻击者“接管”
+  - Stack Smashing 为什么还常见？
+    - 因为以下函数/用法仍大量存在：
+      ```c
+      gets()          // 已废弃，但历史遗留
+      strcpy()
+      strcat()
+      sprintf()
+      scanf("%s")
+      read(fd, buf, 1024) // buf 不一定够大
+      ```
+- 为什么 C/C++ 特别危险？
+  - C 语言遵循“信任程序员”的理念：
+  - 不自动检查数组越界
+  - 不有边界检查
+  - 不保证内存安全
+  - 不初始化内存
+  - 不阻止访问任意地址
+  - 因此：C 是“性能极高”但也“危险无比”的语言，也是所有系统漏洞的第一来源
+  - 为什么说它是 \#1 技术漏洞？
+    - 统计数据：超过 70% 的严重安全漏洞 来自 C/C++ 内存错误；其中最大宗就是 buffer overflow（特别是 stack overflow）
+- 真实世界中巨大影响的两个例子
+  - 1988 Morris Worm（互联网蠕虫病毒）
+    - 关键使用的漏洞：
+      - fingerd 程序里的 buffer overflow
+      - 利用 `gets()` 读取输入导致溢出
+      - 攻击者通过网络发送特制字符串直接造成远程执行代码
+    - 结果：
+      - 6000+ Unix 机器被攻陷（当时互联网大约只有 60000台服务器）
+      - 整个互联网几乎瘫痪
+      - 造成历史上第一次“网络安全大事件”
+  - 1999 MSN Messenger vs AOL IM 的“IM战争”
+    - 事件背景：
+      - MSN 想让自己的客户端接入 AOL 的服务器
+      - AOL 修改服务器，让 MSN 无法登录
+      - 过了一天……MSN 居然“自动修复”，继续能登录！
+        - 微软：我们没更新客户端啊！🤨
+        - AOL：？？？
+    - 发生了什么？
+      - 因为 AOL 服务器的某个认证程序里有 buffer overflow，
+      - MSN 客户端的登录字符串正好触发了溢出，绕过了验证(!)
+  - 结果：
+    - AOL 改一次服务器 → MSN 又能连
+    - 如此至少发生 13 次
+  - 这是真实发生的历史事件，属于“无意中的攻击”
+
+*`gets()`库函数*
+- UNIX 标准库中的 `gets()` 函数用于从标准输入读取一行文本，存入用户提供的缓冲区
+  ```c
+  char *gets(char *dest)
+  {
+      int c = getchar();
+      char *p = dest;
+      while (c != EOF && c != '\n') {
+          *p++ = c;      // 不检查边界
+          c = getchar();
+      }
+      *p = '\0';
+      return dest;
+  }
+  ```
+  `gets()` 永远不会知道 `dest` 有多大
+  - 相似的函数还有 `strcpy()`, `strcat()`, `scanf("%s")` 等
+- echo 示例程序
+  ```c
+  void echo() {
+    char buf[4];   // 只有 4 字节！
+    gets(buf);     // overflow 一定发生
+    puts(buf);
+  }
+  void call_echo() {
+    echo();
+  }
+  ```
+  输入与结果
+  ```
+  unix>./bufdemo-nsp
+  Type a string:0123456789012345678901201234567890123456789012
+
+  unix>./bufdemo-nsp
+  Type a string:012345678901234567890123012345678901234567890123
+  Segmentation Fault
+  ```
+  但在汇编中我们看到：
+  ```asm
+  echo:
+    40069c: sub $0x18,%rsp     // 为本地变量申请24字节
+    4006a0: mov %rsp,%rdi      // rdi = buf 的地址
+    4006a3: call 40064d <gets> // 调 gets
+    4006a8: mov %rsp,%rdi      // rdi = buf (传给 puts)
+    4006ab: call 400500 <puts> // 调 puts
+    4006b0: add $0x18,%rsp     // 恢复栈
+    4006b4: ret                // 返回
+
+  call_echo:
+    4006b5: sub $0x10,%rsp     // 申请16字节栈空间
+    4006b9: call 40069c <echo> // 调 echo
+    4006be: add $0x10,%rsp     // 恢复栈
+    4006c3: add $0x8,%rsp      // 再恢复8字节（返回地址）
+    4006c7: ret                // 返回
+  ```
+  - 为什么 buf 只有 4 字节，但栈上分配了 24 字节？
+    - Linux x86-64 ABI 规定：栈必须保持 16 字节对齐
+    - 再加上编译器可能需要预留空间作为 saved registers、临时变量
+    - 所以最终分配 0x18 = 24 字节
+    - 但其中真正的 buf 只有：
+      ```
+      buf: 4 字节
+      其余 20 字节：未使用
+      ```
+- Before call to gets
+  ```
+  │ Stack Frame for call_echo │
+  ├───────────────┤ ← 下面是 echo 的栈帧
+  │ Return Address (8 bytes)  │ ← call_echo 调用 echo 时压入的
+  ├───────────────┤
+  │ 20 bytes unused           │ ← 为了对齐 + buf 只有 4 字节，剩余是垃圾区
+  ├───────────────┤
+  │ [3] [2] [1] [0] buf       │ ← char buf[4]
+  └───────────────┘ ← %rsp 在 echo 的栈帧里
+  ```
+  - `sub $0x18, %rsp` 分配 24 字节，其中只有最底下的 4 字节真正是 buf
+  - 其余 20 字节未使用（但仍会被 gets 覆写！）
+  - Return Address 在栈帧上方，是 echo 的返回地址，是`4006c3`
+- After call to gets（第一次示例，不会崩溃）
+  - 用户输入：
+    ```
+    01234567890123456789012
+    ```
+    这是 23 个字符 + `'\0'` = 共 24 字节。刚好填满 24 字节的分配区，因此堆栈如下：
+    ```
+    address high ↑
+    │ 00 00 00 00              │ ← 未被覆盖，仍然是 echo 的返回地址
+    │ 00 40 06 c3              │
+    ├───────────────┤
+    │ 00 32 31 30             │
+    │ 39 38 37 36             │
+    │ 35 34 33 32             │
+    │ 31 30 39 38             │
+    │ 37 36 35 34             │ ← buf 的 20 字节未使用区被写入
+    ├───────────────┤
+    │ 33 32 31 30             │ ← buf 的 4 字节
+    └───────────────┘ ← %rsp 在 echo 的栈帧里
+    address low ↓
+    ```
+    并没有写到 ret 地址所在的 8 字节区域，因此程序正常返回
+- After call to gets（第二次示例，会崩溃）
+  - 用户输入：
+    ```
+    012345678901234567890123
+    ```
+    这是 24 个字符 + `'\0'` = 共 25 字节。多出的 1 字节覆盖了返回地址，因此堆栈如下：
+    ```
+    address high ↑
+    │ 00 00 00 00             │ ← 返回地址被覆盖，变成无效值
+    │ 00 40 06 00             │
+    ├───────────────┤
+    │ 33 32 31 30             │
+    │ 39 38 37 36             │
+    │ 35 34 33 32             │
+    │ 31 30 39 38             │
+    │ 37 36 35 34             │ ← buf 的 20 字节未使用区被写入
+    ├───────────────┤
+    │ 33 32 31 30             │ ← buf 的 4 字节
+    └───────────────┘ ← %rsp 在 echo 的栈帧里
+    address low ↓
+    ```
+    当 echo 执行 `ret` 时，试图跳转到被覆盖的返回地址`0x400600`，这是一个无效地址，导致“Segmentation Fault”
+- 关键攻击过程（Stack Smashing）
+  - 实现步骤
+    - gets 写爆 buf
+    - 覆盖 return address
+    - ret 跳到你控制的位置
+  ```
+  call echo
+      |
+      v
+    echo():
+      sub $0x18,%rsp  ← 分配 24 字节
+      gets(buf)       ← 溢出开始
+      puts(buf)
+      ret             ← 读取被你覆盖的返回地址 !!!
+          |
+          +--> 0x4006c8 (= smash)
+                  |
+                  +--> printf("I've been smashed!")
+  ```
+
+*Code Injection Attacks（代码注入攻击）*
+- 输入字符串里包含可执行代码的字节序列（攻击代码 exploit code）
+- 把返回地址 A 覆盖成指向缓冲区 B 的地址
+- 当 Q 执行 ret 时，会跳到攻击代码
+- 函数调用关系：
+  ```c
+  void P() {
+      Q();
+  }
+  int Q() {
+      char buf[64];
+      gets(buf);  // 极度危险
+      return ...;
+  }
+  ```
+  gets 后的栈结构：
+  ```
+  P 的栈帧（Caller frame）
+  ──────────────────────────────
+  | return address A   ← 本来应该返回到 P 的下一条指令
+  ──────────────────────────────
+  | saved registers
+  ──────────────────────────────
+  | Q 的局部变量 buf[64]  <-- gets 会写这里
+  | ....                  <-- gets 会继续写…
+  | exploit code ★       <-- 攻击者输入的可执行机器码
+  | padding
+  | new return address B ★  <-- 攻击字符串覆盖 ret
+  ──────────────────────────────
+  | bottom (%rsp)
+  ```
+- 攻击如何发生
+  - gets(buf) 不检查长度
+    - 攻击者输入 >64 字节，溢出覆盖栈上 buf 之后的数据
+  - 攻击者的输入包含：
+    ```
+    [ exploit machine code ] [ padding ] [ address pointing to B ]
+    ```
+    - exploit code：注入到栈里的机器码（可以是 shellcode）
+    - padding：填充至返回地址位置
+    - new return address：覆盖 ret 的 8 字节，使其指向 exploit code
+  - Q 执行 ret：
+    ```
+    ret → RIP = B（即 buf 的地址）
+    CPU 继续执行攻击代码
+    ```
+    攻击者获得控制权，攻击者的代码在程序进程里运行
+- 代码注入攻击
+  - 缓冲区溢出的一个更加致命的使用就是让程序执行它本来不愿意执行的函数。这是一种最常见的通过计算机网络攻击系统安全的方法。
+- 两步走的攻击策略
+  - 第一步，输人给程序一个字符串，这个字符串包含一些可执行代码的字节编码，称为攻击代码（exploit code)。
+  - 第二步，还有一些字节会用一个指向攻击代码的指针覆盖返回地址。那么，执行ret指令的效果就是跳转到攻击代码。
+
+===== Exploits Based on Buffer Overflows
+
+Buffer overflow bugs allow remote machines to execute arbitrary code on victim machines
+
+*1988 Internet Worm（莫里斯蠕虫）*
+- 缓冲区溢出漏洞允许远程机器在受害机器上执行任意代码
+- Internet worm
+  - UNIX finger 守护进程 fingerd 使用 gets() 读取客户端参数
+  - 蠕虫向 fingerd 发送伪造参数：
+    - "exploit code + padding + new return address"
+  - exploit code：让蠕虫以 root 权限在受害机上运行 shell
+  - 这是第一次利用缓冲区溢出实现*远程代码执行（RCE）*的攻击
+造成大规模网络瘫痪
+- 在1988年11月，著名的Internet蠕虫病毒通过Internet以
+四种不同的方法对许多计算机的获取访问
+- 一种是对FINGER守护进程fingerd的缓冲区溢出攻击。通过以一个适当的字符串调用FINGER，蠕虫可以使远程的守护进程缓冲区溢出并执行一段代码让蠕虫访问远程系统。一旦蠕虫获得了对系统的访问，它就能自我复制几乎完全地消耗掉机器上所有的计算资源。这种蠕虫的始作俑者最后被抓住并被起诉
+- 时至今日，人们还是不断地发现遭受缓冲区溢出攻击的系统安全漏洞。这更加突显了仔细编写程序的必要性。任何到外部环境的接口都应该是“防弹的”，这样外部代理的行为才不会导致系统出现错误
+
+*1999 AIM / MSN IM War（IM 之战）*
+- AOL 利用 AIM 客户端中的缓冲区溢出漏洞来阻止 Microsoft Messenger 访问 AOL 的服务器
+- AOL 发送 exploit code，使客户端返回某个特定 4 字节签名
+- 微软修复后，AOL 改变签名位置继续阻击
+
+*2001 Code Red（红色代码蠕虫）*
+- 2001年7月15日发现的一种网络蠕虫病毒，感染运行Microsoft IIS Web服务器的计算机
+- 其传播所使用的技术可以充分体现网络时代网络安全与病毒的巧妙结合，将网络蠕虫、计算机病毒、木马程序合为一体，开创了网络病毒传播的新路，可称之为划时代的病毒
+- 原理
+  - “红色代码”蠕虫采用了一种叫做"缓存区溢出"的黑客技术， 利用微软IIS的漏洞进行病毒的感染和传播
+  - 该病毒利用HTTP协议, 向IIS服务器的端口80发送一条含有大量乱码的GET请求，目的是造成该系统缓存区溢出，获得超级用户权限
+  - 然后继续使用HTTP 向该系统送出ROOT.EXE木马程序，并在该系统运行，使病毒可以在该系统内存驻留， 并继续感染其他IIS系统
+- 红色病毒首先被eEye Digital Security公司的雇员Marc Maiffret和Ryan Permeh发现并研究。他们将其命名为 “Code Red”，因为他们当时在喝Code Red Mountain Dew
+- 特点
+  - 感染 IIS 服务器
+  - 利用缓冲区溢出注入代码
+  - 传播速度极快
+    - Generate random IP addresses & send attack string
+  - 攻击白宫网站
+  - DDoS 攻击
+- 红色代码蠕虫感染方式：
+  - 向 IIS 发送一个巨大的 GET 请求
+    ```
+    GET /default.ida?NNNNNNNNNNNNNNNNNNNNNN....（几千字节）
+    ```
+  - 造成缓冲区溢出 → 执行蠕虫注入代码
+  - 蠕虫会：
+    - 启动 100 个线程自我复制
+    - 在特定日期攻击白宫（DoS 攻击）
+    - 在服务器网页植入“Hacked by Chinese!”（挑衅性涂鸦）
+  - 利用漏洞安装木马
+  - 继续感染下一台 IIS 服务器
+
+*2016 Dyn DNS 攻击（物联网设备 DDoS）*
+- 攻击影响范围：位于美国东海岸的DNS基础设施所遭受的DDoS攻击来自全球范围，严重影响推特、BBC、华尔街日报、CNN、星巴克、纽约时报、金融时报等网站访问
+- 特点
+  - 大量 IoT 设备被 Mirai 感染成为“肉鸡”
+  - 对 Dyn DNS 发起巨大 DDoS
+  - IoT 安全薄弱：默认密码、漏洞未修复
+  - Mirai 自动暴力破解 telnet 登录
+  - bot 程序根据 CPU 架构选择下载合适的样本
+- 攻击原理
+  - 攻击的方式是针对域名系统（DNS）服务商Dyn进行大型分布式拒绝服务（DDoS），这种攻击方式又简单又粗暴，就是通过大量的数据请求令服务器过载，使正常用户的查询无法被应答。
+  - 包括Mirai等病毒针对物联网设备的DDoS入侵主要通过telnet端口进行流行密码档暴力破解，或默认密码登陆，如果通过telnet登陆成功后就尝试利用busybox等嵌入式必备的工具使用wget下载DDoS功能的bot，修改可执行属性，运行控制物联网设备。由于CPU指令架构的不同，在判断了系统架构后一些僵尸网络可以选择MIPS、arm、x86等架构的样本进行下载。运行后接收相关攻击指令进行攻击
+- 物联网设备安全性低
+  - 由于物联网设备的大规模批量生产、批量部署，在很多应用场景中，集成商、运维人员能力不足，导致设备中有很大比例使用默认密码、漏洞得不到及时修复
+
+
+==== Protection
+
+三种防御方向：
+1. Avoid overflow vulnerabilities      （避免漏洞）
+2. Employ system-level protections     （使用系统级防护）
+3. Have compiler use stack canaries    （让编译器使用栈金丝雀）
+
+===== Avoid Overflow Vulnerabilities in Code （避免在代码里产生漏洞）
+
+- 将`gets()`等不安全函数替换为更安全的版本
+  - 使用 `fgets()` 代替 `gets()`，指定最大读取长度
+  - 使用 `strncpy()` 代替 `strcpy()`，限制复制长度
+  - 使用 `snprintf()` 代替 `sprintf()`，防止缓冲区溢出
+  ```c
+  void echo()
+  {
+    char buf[4];
+    fgets(buf, 4, stdin);
+    puts(buf);
+  }
+  ```
+  #three-line-table[
+    | 危险函数             | 安全替代                       |
+    | ---------------- | -------------------------- |
+    | `gets()`           | `fgets()`（必须指定最大长度）          |
+    | `strcpy()`         | `strncpy()`                  |
+    | `strcat()`         | `strncat()`                  |
+    | `scanf("%s", ...)` | `scanf("%ns", ...)`, 但仍不完全安全 |
+  ]
+
+===== Employ System-Level Protections （使用系统级防护）
+
+*栈地址随机化（stack randomization / ASLR）*
+- 在程序启动时，在栈上分配一个随机量的空间（随机偏移）
+- 整个程序运行期间，栈地址会被“平移”到一个不可预测的位置
+- 这样攻击者就难以精确猜出注入代码的起始地址（攻击字符串中通常含有指向该地址的指针）
+  - 示例：每次运行，栈基址可能是 `0x7ffe4d3be87c`、`0x7fff75a4f9fc`、`0x7ffeadb7c80c` 等
+- 原理解释
+  - ASLR 的目标是提高内存布局的不确定性：堆、栈、共享库、程序基址等在每次执行时都随机化
+  - 攻击者通常需要一个精确地址来覆盖返回地址指向攻击代码（或 ROP 链），ASLR 增加了猜中地址的难度
+- 优点
+  - 对很多“简单的注入攻击”直接无效（因为返回地址难以预测）
+  - 与 NX 等其他技术配合效果更好
+- 局限 / 绕过方式
+  - 暴力破解（brute force）：攻击者可以反复尝试不同偏移（但现代系统可能有速率限制或检测）
+  - NOP 滑道（NOP sled）：攻击者在 shellcode 前放一个很长的 NOP 序列（或等价指令序列），只要跳入滑道任一处就会滑到 shellcode，从而降低对精确地址的依赖
+  - 信息泄露（info leak）：如果程序或库存在能泄露内存地址的漏洞（例如格式化字符串泄露、内存泄漏），攻击者可先通过泄露确定地址，再发动攻击
+  - 低熵问题：32 位系统的地址空间较小，随机化熵不够，容易被猜中；早期实现的 ASLR 熵也较少
+
+*非可执行内存（NX / DEP：No-Execute / Data Execution Prevention）*
+- 旧的 x86 可以从任何可读地址执行机器指令（数据区也可执行）
+- x86-64 / modern CPUs 支持把内存页标记为“不可执行”
+- 如果跳转/ret 到不可执行页 → 立即崩溃（CPU / OS 阻止执行）
+- 当前 Linux/Windows 可把栈标记为 non-executable（栈可读写但不可执行）
+- 原理解释
+  - 内存页有权限位（读 / 写 / 执行）。NX 把“执行”位从“读”中分离出来，使得数据页（如堆/栈）可以设为 RW 但非 X
+  - 如果攻击者把 shellcode 写到栈上，CPU 在尝试执行时会触发页保护异常（SIGSEGV）而不是执行代码
+- 优点
+  - 有效阻止传统的“把 shellcode 写到栈然后跳到它” 的攻击方式（即代码注入被阻断）
+  - 开销小，因为执行权限是页级硬件支持（无额外运行时开销）
+- 局限 / 绕过方式
+  - ret-to-libc / ret2libc：不需要在栈上放 shellcode，只是覆盖返回地址指向 libc 中的 system() 等函数（或 "/bin/sh" 的地址），因此绕过 NX
+  - ROP（Return-Oriented Programming）：攻击者用已有可执行部分（可执行段、共享库）中的短片段（gadgets）拼成链，最终实现任意计算；ROP 在 NX 存在时也是常用绕过方式
+  - 可执行权限被错误设置：如果系统或二进制被误配置为可执行栈（execstack），NX 无效
+
+#example()[
+  在一台运行 Linux 2.6.16 的系统上，我们运行栈地址检测代码 10,000 次，得到的地址范围最小为 `0xffffb754`，最大为 `0xffffd754`。
+  + 该地址范围大约是多少？
+    + `0xffffd754 - 0xffffb754 = 0x2000 = 8192` 字节（8 KB）$2^13$
+  + 在上面这个地址范围内，如果我们用一个 128 字节的 NOP 滑道（nop sled）尝试进行缓冲区溢出攻击，大约需要尝试多少次才能覆盖所有可能的起始地址？
+    + `8192 / 128 = 64` 次
+]
+
+===== Have Compiler Use Stack Canaries （让编译器使用栈金丝雀）
+
+- 想法（Idea）
+  - 在缓冲区（buffer）之后放置一个特殊值（“金丝雀 canary”），在函数返回前检查该值是否被篡改
+  - 如果被改，说明发生了溢出，程序会立刻报错或终止
+- GCC 的实现
+  - 通过 `-fstack-protector`（现在在许多发行版默认开启）来插入金丝雀检查
+  - 示例交互：
+    ```shell
+    $ ./bufdemo-sp
+    Type a string:0123456
+    0123456
+
+    $ ./bufdemo-sp
+    Type a string:012345678
+    *** stack smashing detected ***
+    ```
+- 受保护函数的反汇编
+  ```asm
+  echo:
+    40072f: sub    $0x18,%rsp             # 分配栈帧（24 字节）
+    400733: mov    %fs:0x28,%rax          # 从 %fs:0x28 读取 canary（线程局部）
+    40073c: mov    %rax,0x8(%rsp)         # 把 canary 存到栈帧（在 buf 之后的位置）
+    400741: xor    %eax,%eax              # 将 %eax 置0（清除低 32 位寄存器）
+    400743: mov    %rsp,%rdi
+    400746: callq  gets                   # 调用 gets（可能溢出覆盖 canary）
+    ...
+    400753: mov    0x8(%rsp),%rax         # 返回前把栈上的 canary 读回到 %rax
+    400758: xor    %fs:0x28,%rax         # 用线程局部的 canary 与栈上的 canary 做异或
+    400761: je     400768 <echo+0x39>     # 如果相等（ZF=1）则跳过错误处理
+    400763: callq  400580 <__stack_chk_fail@plt>  # 不相等 -> 溢出检测失败 -> 调用处理函数
+    400768: add    $0x18,%rsp
+    40076c: retq
+  ```
+  逐步说明：
+  - `sub $0x18,%rsp`：为本函数分配栈空间（与之前无保护版本相同）。
+  - `mov %fs:0x28,%rax`：从线程局部存储（TLS）或某个内核/运行时维护处读取全程序/线程的金丝雀值（`__stack_chk_guard`）。在 Linux 下 fs:0x28 是线程信息块里保存该值的约定位置。
+  - `mov %rax,0x8(%rsp)`：把这个 canary 写入栈帧内（放在缓冲区和返回地址之间，函数末尾会读取检查）。
+  - 函数体执行（这里 `gets` 可能会把输入写过 buf，覆盖到 canary 区）。
+  - 返回前通过 `mov 0x8(%rsp),%rax` 将存放在栈上的 canary 取出，再与 `xor %fs:0x28,%rax`（将栈上值与原始的守护值异或）——如果两者相等，则 `xor` 结果为 0，`je` 成立；否则非 0 跳到 `__stack_chk_fail`。
+  - `__stack_chk_fail` 一般会打印 “stack smashing detected” 然后终止程序（或做其他响应），从而阻止溢出被悄悄利用。
+- 金丝雀的设置（如何放到栈里）
+  ```
+  Stack frame 布局（echo）：
+  | return addr (8B) |
+  | canary (8B)      | ← 存在 0x8(%rsp)
+  | unused (20B)     |
+  | buf[4]           |
+  %rsp
+  ```
+  进入函数立即把 `__stack_chk_guard` 放到 `0x8(%rsp)`，这样在调用可能写入 buf 的库函数之前就把 canary 放好了
+- 为什么可以允许某些输入长度却报错于另一些
+  - 假如 buf 是 4 字节，栈帧为 24 字节，总体有 4（buf）+20（unused）=24 这部分可由 gets 覆写而不碰到 canary。如果输入长度不超过这 24 字节，就不会修改放在 0x8(%rsp) 处的 canary
+  - 一旦写入长度过大，写入会越过 canary 的位置并改变它的值，返回时对比失败，从而触发 `__stack_chk_fail`
+  - 某些 canary 方案会让 canary 的最低字节为 0x00，这导致某些字符串函数（以 `\0` 结束）行为上可能无法覆盖全部 canary，从而需要更长或不同方式的覆盖才成功。
+- 金丝雀的类型
+  - terminator-canary（终止符金丝雀）
+    - 常见值包含 `0x00`、`\n`、`0xff` 等，使得常见字符串函数（strcpy 等）在某些情形下无法把 canary 完整覆盖，从而阻止攻击者用简单字符串复制覆盖 canary。
+    - 优点：针对基于字符串操作的溢出有额外防护。
+    - 缺点：对于非字符串写（memcpy）或精心构造的二进制填充，仍可绕过。
+  - random-canary（随机金丝雀）
+    - 在程序或线程启动时生成一个随机 32/64 位值，放在 `__stack_chk_guard` 中。攻击者无法预知其值，覆盖时不得不猜测正确值（非常难）。
+    - GCC 常用随机 canary（来自 /dev/urandom 或 libc 初始化）。
+  - xor-canary / canary-with-xor
+    - 有些实现会把 canary 存到栈并在比较时使用异或或其他操作与栈地址/返回地址混合，增强对某些攻击的抵抗力。GCC 的实现把 TLS 中的 guard 读出并直接比较—实际 glibc 还可能使用一些混合策略。
