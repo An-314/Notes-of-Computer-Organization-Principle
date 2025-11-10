@@ -33,6 +33,23 @@
   ]]
 ]
 
+#solution[
+  表中给出了内存、寄存器的值，约定使用 AT&T 寻址记法：`disp(base, index, scale)`，无 `$` 的数字常量作为内存地址（即 `M[disp]`），带 `$` 的是立即数。
+  #three-line-table[
+    | Operand          | Value   | 计算说明                                               |
+    | ---------------- | ------- | -------------------------------------------------- |
+    | `%rax`           | `0x100` | 寄存器内容                                              |
+    | `0x104`          | `0xAB`  | 取内存 M[0x104]                                       |
+    | `$0x108`         | `0x108` | 立即数                                                |
+    | `(%rax)`         | `0xFF`  | M[%rax] = M[0x100]                                 |
+    | `4(%rax)`        | `0xAB`  | M[0x100+4] = M[0x104]                              |
+    | `9(%rax,%rdx)`   | `0x11`  | 地址 = 9 + 0x100 + 0x3 = 0x10C，取 M[0x10C]            |
+    | `260(%rcx,%rdx)` | 未知  | 地址 = 260 + 0x10 + 0x3 = 279 (0x117)，题中未给出 M[0x117] |
+    | `0sxFC(,%rcx,4)`  | 未知  | 地址 = 0xFC + 0x10×4 = 0x13C，题中未给出 M[0x13C]          |
+    | `(%rax,%rdx,4)`  | `0x11`  | 地址 = 0x100 + 0x3×4 = 0x10C，取 M[0x10C]              |
+  ]
+]
+
 #problem(subname: [3.15])[
   In the following excerpts from a disassembled binary, some of the information has been replaced by X's. Answer the following questions about these instructions.
   + What is the target of the `je` instruction below?(You do not need to know anything about the `callq` instruction here.)
@@ -55,6 +72,10 @@
     4005e8: e9 73 ff ff ff  jmpq   XXXXXX
     4005ed: 90              nop
     ```
+]
+
+#solution[
+
 ]
 
 #problem(subname: [3.35])[
