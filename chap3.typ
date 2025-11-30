@@ -963,11 +963,11 @@ Voltage
 - 逻辑门是实现布尔函数的基本单元
 - 常见门：
   #three-line-table[
-    | Gate | Function     |   |   |
-    | ---- | ------------ | - | - |
-    | AND  | out = a && b |   |   |
-    | OR   | out = a      |   | b |
-    | NOT  | out = !a     |   |   |
+    | Gate | Function     |
+    | ---- | ------------ |
+    | AND  | out = a && b |
+    | OR   | out = a \|\| b |
+    | NOT  | out = !a     |
   ]
   逻辑门执行布尔函数，这些函数是整个数字系统的基础。
 - 逻辑门是组合逻辑
@@ -1022,6 +1022,7 @@ Inputs ---> [ Gate Network ] ---> Outputs
     ```
 - *Word-level MUX*
   - 功能：选择两个字（word）中的一个输出
+  - Select input word A or B depending on control signal s
   - HCL 形式：
     ```c
         int Out = [
@@ -1042,5 +1043,847 @@ Inputs ---> [ Gate Network ] ---> Outputs
     ];
     ```
     依次匹配条件，类似 switch-case 的语义
-- *Word Equality（64-bit 相等比较）*
-  -
+*Word Equality（64-bit 相等比较）*
+- 把 64 个 bit-equal 组合为一个大电路：
+  ```
+  Eq = eq63 && eq62 && ... && eq0
+  ```
+  HCL 简写：
+  ```
+  bool Eq = (A == B)
+  ```
+
+==== Arithmetic Logic Unit (ALU)
+
+*Arithmetic Logic Unit (ALU)*
+- ALU 是处理器 datapath 的核心
+- Y86-64 需要支持 4 个操作：
+  - addq：X + Y
+  - subq：X - Y
+  - andq：X & Y
+  - xorq：X ^ Y
+- ALU 的输入：
+  - X（来自寄存器 rA）
+  - Y（来自寄存器 rB 或立即数）
+  - 控制信号 ALUFUN（选择加减/逻辑运算）
+- 输出：
+  - ALUresult（64 位）
+  - 条件码：ZF、SF、OF
+*组合逻辑*
+- 逻辑门是数字电路的基本计算单元
+- 组合电路是由大量逻辑门组成的无环网络
+- 组合电路不存储信息
+- 组合电路输出 = 输入的确定性函数
+- 组合电路对输入变化做出近乎立即的响应
+
+=== 时序电路
+
+时序逻辑与前面的组合逻辑（combinational logic）不同，它加入了时间的概念，电路可以存储状态。
+
+在处理器中，所有“存储状态”的组件都属于时序逻辑，比如：
+- 程序计数器（PC）
+- 条件码寄存器（CC）
+- 程序状态寄存器（Stat）
+- 寄存器文件（register file）
+- 内存（DMEM）
+- 以及所有流水线寄存器
+组合逻辑只能做输入 → 输出的映射，没有记忆。但处理器需要：
+- 记住当前执行到哪里（PC）
+- 记住临时数据（寄存器）
+- 保存程序信息（内存）
+所以我们需要能记住所选信号的电路：也就是 latch（锁存器）和 flip-flop（触发器）。
+
+==== 双稳态存储元件（Bistable Element）
+
+(Storing 1 Bit)电路特征：
+- 有两个稳定点（0 和 1）
+- 有一个不稳定点（metastable）
+- 输入电压一旦离开临界点就会“倒向”0 或 1
+这就是存储 1 bit 的最基本物理结构。
+
+==== R–S Latch（基本锁存器）
+
+(Storing and Accessing 1 Bit) R = Reset（让输出 = 0），S = Set（让输出 = 1）
+#three-line-table[
+  | R | S | 输出 Q       |
+  | - | - | ---------- |
+  | 1 | 0 | 0          |
+  | 0 | 1 | 1          |
+  | 0 | 0 | 保持原来的值（存储） |
+]
+当 R = S = 0 时，电路进入存储模式，能保持原值不变。
+
+==== D-Latch（数据锁存器）
+
+(Transparent 1-Bit Latch) 为了解决 R-S Latch 无法同时 R=S=1 的不合法状态，引入了 D（Data）锁存器。
+
+D-Latch：
+- 输入端：D
+- 时钟端：C
+- 当 C = 1 时，允许信号通过（透明）
+- 当 C = 0 时，锁存当前值
+因此 D-Latch = “透明锁存器”
+
+缺点：当时钟为高电平时，只要 D 改变，输出 Q 会跟着变。
+
+==== 边沿触发（Edge-Triggered）触发器
+
+为避免透明时期产生的毛刺（glitch），采用 edge-triggered flip-flop（边沿触发触发器）。
+
+特点：
+- 仅在时钟 上升沿（rising edge）锁存数据
+- 其他时间都不变（保持输出）
+这是现代 CPU 中寄存器的基础
+
+==== 寄存器（Register）
+
+寄存器（Register）是存储一个“字(word)”的数据的硬件单元
+
+一个寄存器由多个边沿触发器（edge-triggered latch / flip-flop） 组成，每个触发器存储 1 bit：
+```
+i7 ─► [DFF] ─► o7
+i6 ─► [DFF] ─► o6
+...
+i0 ─► [DFF] ─► o0
+```
+- D：数据输入
+- Q+：输出
+- Clock：时钟输入
+寄存器行为：
+- #three-line-table[
+    | 时刻        | 寄存器输出        | 存储值  |
+    | --------- | ------------ | ---- |
+    | *大部分时间* | 输出 = 上一周期存的值 | 不变   |
+    | *时钟上升沿* | 输出变成输入       | 立即更新 |
+  ]
+这构成了处理器执行阶段与阶段之间的屏障（barrier）
+
+*寄存器作为逻辑之间的“屏障”*
+- 寄存器把电路切成了一个一个的“周期”：
+  ```
+  [ 组合逻辑 ] → [ 寄存器 ] → [ 组合逻辑 ] → [ 寄存器 ] → …
+  ```
+- 作用：
+  - 阻断组合逻辑的传播
+    - 没有寄存器，信号会一路传播，无法定义“步骤”。
+  - 决定电路的运行节奏（周期）
+  - 让电路有“状态”
+- → 这才让 CPU 能在多个周期中执行指令。
+
+*状态机实例：累加器（Accumulator）*
+```
+In →(MUX)→(ALU 加法)→ Register → Out
+```
+控制信号 Load：
+- Load = 1 → 下周期寄存器加载 IN（相当于 reset）
+- Load = 0 → 下周期寄存器加载 (Out + In)
+运行示例：
+- #three-line-table[
+    | Cycle | Load | In | Out (下一周期的值) |
+    | ----- | ---- | -- | ------------ |
+    | 0     | 1    | x0 | x0           |
+    | 1     | 0    | x1 | x0 + x1      |
+    | 2     | 0    | x2 | x0 + x1 + x2 |
+    | 3     | 1    | x3 | x3           |
+    | 4     | 0    | x4 | x3 + x4      |
+    | 5     | 0    | x5 | x3 + x4 + x5 |
+  ]
+- 这是典型的有限状态机 FSM，状态存储在寄存器中。
+- CPU 本质上也是一个巨大的有限状态机。
+
+==== 随机访问存储器（RAM）
+
+RAM（包括寄存器文件 Register File）也是时序结构。
+
+*Register File 架构*
+```
+Read port A → srcA → valA
+Read port B → srcB → valB
+Write port W ← dstW, valW
+```
+寄存器文件支持：
+- 两个读端口
+- 一个写端口
+- 写在时钟上升沿更新
+- 读操作“像组合逻辑”即时生效
+作用
+- 对特定地址的寄存器进行读写
+- 一次可以读写多个字
+特别注意
+- 若 srcA = 0x4，读取的是 %rsp
+- 若 srcA = 0xF（ID=15），表示“不读”（输出忽略）
+
+*寄存器文件时序极其重要*
+- 读（READ）
+  - 当 srcA/B 改变 → valA/valB 立即改变（本质上是一个巨大的多路复用器 MUX）
+- 写（WRITE）
+  - 只有时钟上升沿寄存器才更新
+  - 若 dstW=F → 不写
+- 这才能保证 CPU 执行顺序正确。
+
+==== HCL（Hardware Control Language）
+
+- HCL 用来描述组合逻辑，不会描述时序电路（寄存器内部结构）。
+- 我们用 HCL 来描述 CPU 控制逻辑，如 SEQ 或 PIPE 阶段。
+
+- Data Types
+  - bool: Boolean
+    - `a, b, c, `…
+  - int: words
+    - `A, B, C, ` …
+    - Does not specify word size---bytes, 64-bit words, …
+- Statements
+  - `bool a = bool-expression;`
+  - `int A = int-expression;`
+- Boolean 表达式
+  - Logic operations: `&&`, `||`, `!`
+  - Word comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
+  - Set membership: `A in {val1, val2, ...}`
+- Word 表达式
+  - Case expressions (MUX)
+    ```
+    int Out = [
+      condition1 : value1;
+      condition2 : value2;
+      ...
+      1          : valueN;  # default
+    ];
+    ```
+
+==== 总结
+
+*组合逻辑 + 寄存器 = 时序逻辑系统（CPU的本质）*
+- 时序系统基本结构：
+  ```
+               +---------------------------+
+               |     Combinational Logic   |
+  State ----->| (ALU, control, muxes etc.) |-----> Next State
+               +------------+--------------+
+                            |
+                            |
+                         Register
+                       (Clock Rising)
+  ```
+- Computation
+  - Performed by combinational logic
+  - Computes Boolean functions
+  - Continuously reacts to input changes
+- Storage
+  - Registers
+    - Hold single words
+    - Loaded as clock rises
+  - Random-access memories
+    - Hold multiple words
+    - Possible multiple read or write ports
+    - Read word when address input changes
+    - Write word as clock rises
+- 电路分类
+  - 组合电路：例如ALU、输入选择器等
+  - 时序电路：随机访问存储器（包括寄存器文件、内存）、时序电路（程序计数器（PC）、条件码和程序状态）
+- 寄存器
+  - 在说到硬件和机器级编程时，“寄存器”有不同含义
+  - 寄存器文件不是组合电路（因为有内部存储）
+    - 但读数据类似组合电路
+    - 写数据由时钟信号控制
+- 寄存器作为电路中不同部分的组合逻辑之间的屏障
+  - 不断深入理解“屏障”的意义
+
+=== CPU 设计 —— 从指令到硬件
+
+CPU 的所有复杂指令最终都可以归纳成少数几个硬件模块的组合：
+#three-line-table[
+  | 指令类别                  | 最终硬件动作                |
+  | --------------------- | --------------------- |
+  | mov / load / store    | 计算地址 + 读/写寄存器 + 读/写内存 |
+  | add / sub / and / xor | ALU 计算                |
+  | jmp / jxx             | 根据条件码决定下一条 PC         |
+  | push / pop            | 特殊的内存操作 + 栈指针更新       |
+  | call / ret            | 操作 PC + 栈             |
+  | halt / nop            | 不做事情（但仍然走硬件管线）        |
+]
+硬件内部没有“指令”概念，它只有执行动作（信号 + 电路）；因此 CPU 要做的关键事是把每条指令翻译成硬件行为。
+
+*Y86-64 指令集*
+```
+halt   0 0
+nop    1 0
+rrmovq / cmovXX  2 fn rA rB
+irmovq 3 0 F rB V
+rmmovq 4 0 rA rB D
+mrmovq 5 0 rA rB D
+OPq    6 fn rA rB
+jXX    7 fn Dest
+call   8 0 Dest
+ret    9 0
+pushq  A 0 rA F
+popq   B 0 rA F
+```
+每条指令的第一个字节：icode:ifun，CPU 只要读取第一个字节，就知道整条指令的长度、格式、需要哪些硬件行为。
+
+==== SEQ 硬件结构
+
+```
+             Writeback
+               ↑
+PC → Fetch → Decode → Execute → Memory → Writeback → (更新 PC)
+```
+SEQ = 顺序执行一次完成一条指令。不是流水线！
+- 硬件结构按顺序执行 5 个阶段：
+  - Fetch：从指令内存中读指令
+  - Decode：读寄存器
+  - Execute：ALU 计算
+  - Memory：读/写数据内存
+  - Writeback：写寄存器
+  - PC Update：计算下一条指令的 PC
+- 状态 State
+  - Program counter register (PC) 程序计数器
+  - Condition codes (ZF, SF, OF) 条件码
+  - Register file 寄存器文件
+  - Memory 数据内存
+    - Access same memory space 访问相同内存空间
+    - Data: for reading/writing program data 数据
+    - Instructions: for fetching instructions 取指令
+- 指令流 Instruction Flow
+  - Read instruction at address specified by PC 取指令
+  - Processe through stages 处理各阶段
+  - Update PC to point to next instruction 更新 PC
+
+*Fetch —— 取指令*
+- 从指令内存中读出：
+  - icode, ifun
+  - rA, rB (如果有)
+  - valC（立即数或位移）
+  - valP（下一条指令地址 = PC + 指令长度）
+  #three-line-table[
+    | 输出名   | 含义        |
+    | ----- | --------- |
+    | icode | 指令类型      |
+    | ifun  | 指令功能码     |
+    | rA    | 源寄存器编码    |
+    | rB    | 目标寄存器编码   |
+    | valC  | 常数或地址     |
+    | valP  | 本条指令末端的地址 |
+  ]
+- Fetch 阶段本质是：解析指令编码。
+*Decode —— 寄存器读（通过寄存器文件）*
+- 寄存器文件有：
+  ```
+  srcA, srcB → 读端口
+  dstE, dstM → 写端口
+  ```
+- Decode 输出：
+  #three-line-table[
+    | 输出   | 含义         |
+    | ---- | ---------- |
+    | valA | srcA 的寄存器值 |
+    | valB | srcB 的值    |
+  ]
+*Execute —— ALU 运算 + 条件码更新*
+- ALU 有两个输入：
+  ```
+  aluA
+  aluB
+  ```
+  由指令类型决定。
+  - 例如：
+    - addq → aluA = valA, aluB = valB
+    - rmmovq → aluA = valC(位移), aluB = valB(base)
+    - pushq → aluA = -8, aluB = %rsp
+- Execute 输出：
+  #three-line-table[
+    | 输出   | 含义                    |
+    | ---- | --------------------- |
+    | valE | ALU 结果                |
+    | Cnd  | 条件成立？（用于条件跳转或 cmovXX） |
+  ]
+*Memory —— 访问数据内存*
+- Memory 单元做：
+  - rmmovq → 写内存[mem(valE)] = valA
+  - mrmovq → valM = 内存读[valE]
+  - pushq → 写内存[rsp - 8]
+  - popq → 读内存[rsp]
+- 输出：
+  #three-line-table[
+    | 输出  | 含义        |
+    | --- | --------- |
+    | valM | 读出的内存值   |
+  ]
+*Writeback —— 写寄存器*
+- Writeback 根据：
+  ```
+  dstE → 写 valE
+  dstM → 写 valM
+  ```
+  例如：
+  ```asm
+  addq rA,rB → dstE = rB
+  mrmovq D(rB), rA → dstM = rA
+  ```
+*PC Update —— 下一条指令地址*
+- PC 的更新逻辑依赖指令：
+  #three-line-table[
+    | 指令   | 下一 PC 的来源           |
+    | ---- | ------------------- |
+    | 普通指令 | valP                |
+    | 条件跳转 | (Cnd ? Dest : valP) |
+    | call | Dest                |
+    | ret  | valM（从栈中得到返回地址）     |
+  ]
+  这就是 CPU 如何控制指令流。
+
+*将指令执行组织成阶段*
+- 处理器无限循环，执行这些阶段。
+- 执行一条指令是需要进行很多处理的。
+  - 我们不仅必须执行指令所表明的操作，还必须计算地址、更新栈指针，以及确定下一条指令的地址。
+  - 幸好每条指令的整个流程都比较相似。
+- 降低复杂度——复用
+  - 让不同的指令共享尽量多的硬件。
+  - 在硬件上复制逻辑块的成本比软件中有重复代码的成本大得多。
+- 我们面临的一个挑战是将每条不同指令所需要的计算放入
+到上述那个通用框架中。
+
+*小结*
+- Fetch（取指令）：
+  - 根据 PC（程序计数器），到指令存储器里把“下一条指令的字节”读出来。
+- Decode（译码）：
+  - 从这些字节中解析出：
+    - 这是哪条指令（icode）
+    - 具体功能/条件（ifun）
+    - 可能会用到哪几个寄存器（rA, rB）
+    - 有没有常数字面量（valC）
+- Execute（执行）：
+  - 用 ALU 做计算：
+    - 算加减乘除/与或非/XOR
+    - 算地址（例如 base + offset）
+    - 更新条件码（ZF/SF/OF）
+    - 判断条件跳转是否成立（生成 Cnd）
+- Memory（访存）：
+  - 和数据内存打交道：
+    - `M8[valE] = valA`（写内存）
+    - `valM = M8[valE]` 或 `valM = M8[valA]`（读内存）
+- WriteBack（写回）：
+  - 把计算结果写回寄存器文件：
+    - `R[dstE] = valE`
+    - `R[dstM] = valM`
+- PC Update（更新 PC）：
+  - 决定下一条指令的地址：
+    - 一般就是下一条顺序执行的 valP
+    - 对于跳转/调用/返回，用目标地址、栈里弹出的返回地址等替换 PC
+```
+           +---------------------+
+ PC  --->  |   取指令 Fetch      | ---> icode, ifun, rA, rB, valC, valP
+           +---------------------+
+                            |
+                            v
+           +---------------------+
+           |   译码 Decode       | ---> valA, valB, srcA, srcB, dstE, dstM
+           +---------------------+
+                            |
+                            v
+           +---------------------+
+           |   执行 Execute      | ---> valE, Cnd, 新的 CC
+           +---------------------+
+                            |
+                            v
+           +---------------------+
+           |   访存 Memory       | ---> valM
+           +---------------------+
+                            |
+                            v
+           +---------------------+
+           |   写回 WriteBack    | ---> R[dstE], R[dstM]
+           +---------------------+
+                            |
+                            v
+           +---------------------+
+           |   PC Update         | ---> newPC
+           +---------------------+
+                            |
+                            v
+                           PC（下一轮）
+```
+- 所有指令，都是沿着这一条“大管子”往前走；
+- 不同指令只是在某些阶段“用多一点 / 少一点 / 不用”；
+- 硬件模块尽量复用：同一套 ALU、同一块数据存储器，所有指令共用。
+
+=== 指令格式与解码（Instruction Decoding）
+
+*86-64 指令的字节格式*
+- 第 1 字节：`icode:ifun`
+  - 高 4 bit：`icode`（指令种类，例如 OPq、rmmovq、call 等）
+  - 低 4 bit：`ifun`（功能码，比如加/减/与/异或，或跳转条件）
+- 可选的第 2 字节：`rA:rB`
+  - 高 4 bit：`rA`（寄存器 A ID）
+  - 低 4 bit：`rB`（寄存器 B ID）
+  - 如果某个位置不用寄存器，就用 0xF 代表“No register”。
+- 可选的常数字（`valC`，8 字节）
+  - 可能是立即数、偏移量、跳转目标地址等
+  - 小端存储，连续 8 个字节
+*解码阶段做的事*
+- 在 Fetch 阶段：从指令内存读原始字节：
+  - `icode:ifun ← M1[PC]`
+  - 如果该指令需要寄存器字节：`rA:rB ← M1[PC+1]`
+  - 如果该指令需要常数字：`valC ← M8[PC+2]`（或 `PC+1`，依指令不同）
+  - `valP` = 指向下一条指令的地址（`PC` 加上本条指令长度）
+- 在 Decode 阶段：根据 `icode` 决定：
+  - 这条指令要从哪些寄存器读操作数（`srcA`, `srcB`）
+  - 计算结果要写回到哪个寄存器（`dstE`, `dstM`）
+  - 同时从寄存器堆读出：
+    - `valA ← R[srcA]`
+    - `valB ← R[srcB]`
+*每个阶段要“算/产生”哪些中间值*
+- Fetch 阶段输出：
+  #three-line-table[
+    | 输出名   | 含义        |
+    | ----- | --------- |
+    | icode | 指令类型      |
+    | ifun  | 指令功能码     |
+    | rA    | 源寄存器编码    |
+    | rB    | 目标寄存器编码   |
+    | valC  | 常数或地址（立即数/偏移/目标地址）    |
+    | valP  | 本条指令末端的c地址、顺序执行时的下一条指令地址 |
+  ]
+- Decode 阶段输出：
+  - 根据 `icode`，决定
+    #three-line-table[
+      | 信号名  | 含义               |
+      | ---- | ---------------- |
+      | srcA | 需要从哪个寄存器读操作数 A    |
+      | srcB | 需要从哪个寄存器读操作数 B    |
+      | dstE | ALU 结果应该写入哪个寄存器    |
+      | dstM | 从内存读出的值应该写入哪个寄存器    |
+    ]
+  - 然后读寄存器文件，得到：
+  #three-line-table[
+    | 输出   | 含义         |
+    | ---- | ---------- |
+    | valA | srcA 的寄存器值 |
+    | valB | srcB 的值    |
+  ]
+- Execute 阶段输出：
+  #three-line-table[
+    | 输出   | 含义                    |
+    | ---- | --------------------- |
+    | valE | ALU 结果                |
+    | Cnd  | 条件成立？（用于条件跳转或 cmovXX） |
+  ]
+- Memory 阶段输出：
+  #three-line-table[
+    | 输出  | 含义        |
+    | --- | --------- |
+    | valM | 读出的内存值   |
+  ]
+  - 如果指令是 store 类（rmmovq、pushq、call 等）：
+    - `M8[地址] ← 数据` 地址通常由 valE 或 valA 给出
+  - 如果指令是 load 类（mrmovq、popq、ret 等）：
+    - `valM ← M8[地址]`
+- WriteBack 阶段
+  - 如果有 ALU 结果要写回
+    - `R[dstE] ← valE`
+  - 如果有内存读值要写回
+    - `R[dstM] ← valM`
+- PC Update 阶段
+  - 根据 icode 判断下一条指令 PC：
+    - 普通指令：PC ← valP
+    - 条件跳转：PC ← Cnd ? valC : valP
+    - call：PC ← valC（目标地址）
+    - ret：PC ← valM（从栈里读出的返回地址）
+
+*算术/逻辑指令 OPq rA, rB*
+```asm
+OPq rA, rB     # 6 fn rA rB
+```
+例子：addq %rax, %rsi 编码：60 06。直观含义：
+- 取出寄存器 rA 中的值，加到寄存器 rB 中的值上，结果写回 rB；
+- 同时更新条件码（ZF、SF、OF）。
+- Fetch：
+  ```
+  icode:ifun ← M1[PC]      # 读操作码和功能码（哪种 OP）
+  rA:rB   ← M1[PC+1]       # 读寄存器编码
+  valP    ← PC + 2         # OPq 指令长度固定 2 字节
+  ```
+- Decode：
+  - 需要从两个寄存器读操作数：
+    ```
+    srcA ← rA
+    srcB ← rB
+    valA ← R[rA]
+    valB ← R[rB]
+    ```
+  - 结果写回`rB`：
+    ```
+    dstE ← rB
+    dstM ← RNONE
+    ```
+- Execute：
+  - 由 ifun 决定具体算什么：
+    - `ifun=0`：加法
+    - `ifun=1`：减法
+    - `ifun=2`：and
+    - `ifun=3`：xor
+  ```
+  valE ← valB OP valA   # 注意是 valB OP valA（符合 x86 语义）
+  Set CC                # 更新 ZF/SF/OF
+  ```
+- Memory
+  - OPq 不访问内存数据段：
+    ```
+    [valM 未使用]
+    ```
+- WriteBack
+  ```
+  R[dstE] ← valE    # R[rB] ← valE
+  ```
+- PC Update
+  ```
+  PC ← valP         # 顺序执行下一条
+  ```
+- 所有算术/逻辑操作都可以看成 “从两个寄存器读 → ALU 做运算 → 写回一个寄存器”，这一套完全符合“6 阶段统一模板”。
+- 注意结果写回`rB`，所以`rB`同时是源操作数和目的寄存器。
+
+*rmmovq rA, D(rB) —— 寄存器到内存*
+```asm
+rmmovq rA, D(rB)    # 4 0 rA rB  D(8 字节)
+```
+- 含义：
+  - 有点像 x86 的 movq %rA, D(%rB)：
+    - 地址`= R[rB] + D`
+    - 把`R[rA]`的值写到内存[address]
+- Fetch：
+  ```
+  icode:ifun ← M1[PC]
+  rA:rB     ← M1[PC+1]
+  valC      ← M8[PC+2]   # D
+  valP      ← PC + 10    # 1 + 1 + 8
+  ```
+- Decode：
+  ```
+  srcA ← rA          # 要写出去的值
+  srcB ← rB          # 基址寄存器
+  valA ← R[rA]
+  valB ← R[rB]
+  dstE ← RNONE       # 没有寄存器写回
+  dstM ← RNONE
+  ```
+- Execute：
+  - 用 ALU 计算有效地址：
+  ```
+  valE ← valB + valC   # R[rB] + D
+  ```
+- Memory：
+  - 往内存写数据：
+  ```
+  M8[valE] ← valA      # 写 8 字节
+  ```
+- WriteBack：
+  - 不写回任何寄存器
+- PC Update：
+  ```
+  PC ← valP
+  ```
+- 这里可以看到 “ALU 不只是算加减，还负责地址计算”。
+- 设计上就是让所有“地址 = 基址 + 偏移”这种事情都走 Execute 阶段，复用一套 ALU。
+*popq rA —— 从栈顶弹出*
+```
+popq rA    # B 0 rA F
+```
+- 含义：
+  - 从当前`%rsp`指向的内存地址读取 8 字节 → 写入寄存器`rA`
+  - `%rsp += 8`（栈向高地址“弹”回去）
+- Fetch：
+  ```
+  icode:ifun ← M1[PC]
+  rA:rB     ← M1[PC+1]
+  valP      ← PC + 2
+  ```
+- Decode：
+  - 栈指针`%rsp`需要读两次（一个做地址，一个做基数参与加法）：
+  ```
+  srcA ← RSP
+  srcB ← RSP
+  valA ← R[%rsp]
+  valB ← R[%rsp]
+
+  dstE ← RSP     # 更新后的栈指针要写回
+  dstM ← rA      # 从内存读出的数据要写到 rA
+  ```
+- Execute：
+  - 更新栈指针：
+  ```
+  valE ← valB + 8   # 新的 %rsp
+  ```
+- Memory：
+  - 从旧的栈顶地址读出值：
+  ```
+  valM ← M8[valA]   # 这里 valA 是旧的 %rsp
+  ```
+- WriteBack：
+  ```
+  R[%rsp] ← valE    # 更新栈顶
+  R[rA]   ← valM    # 弹出值写入目标寄存器
+  ```
+- PC Update：
+  ```
+  PC ← valP
+  ```
+- 这里复用了 ALU 来做 “%rsp + 8” 的加法；
+- 注意要同时更新两个寄存器：一个是 %rsp，一个是目标寄存器 rA。
+- 所以 dstE = RSP, dstM = rA，WriteBack 阶段一次搞定。
+*条件传送 cmovXX rA, rB*
+```asm
+cmovXX rA, rB   # 2 fn rA rB
+```
+含义：
+- 如果条件成立：rB = rA
+- 如果条件不成立：什么都不做（看起来），但在硬件里会“取消写回”。
+- Fetch：
+  ```
+  icode:ifun ← M1[PC]
+  rA:rB     ← M1[PC+1]
+  valP      ← PC + 2
+  ```
+- Decode：
+  ```
+  srcA ← rA
+  srcB ← RNONE
+  valA ← R[rA]
+  valB ← 0          # 或 RNONE，不参与
+  dstE ← rB         # 目标寄存器
+  dstM ← RNONE
+  ```
+- Execute：
+  - 让 ALU 直接“透传” valA：
+  ```
+  valE ← valB + valA   # 这里 valB 可以是 0，相当于 valE = valA
+  Cnd  ← Cond(CC, ifun)
+  ```
+  - 如果条件不成立，通过把 dstE 改成 RNONE 来“取消写回”：
+  ```
+  if !Cnd then dstE ← RNONE
+  ```
+- Memory：
+  - 不访问数据内存。
+- WriteBack：
+  ```
+  if dstE != RNONE:
+    R[dstE] ← valE
+  ```
+- PC Update：
+  ```
+  PC ← valP
+  ```
+- 真正的“条件性”体现在 “要不要写回结果”。
+- 这样就不需要在 ALU 或寄存器文件里加复杂逻辑，只靠一个 dstE 是否为 RNONE 来控制。
+*条件跳转 jXX Dest*
+```asm
+jXX Dest   # 7 fn Dest(8 字节)
+```
+- Fetch：
+  ```
+  icode:ifun ← M1[PC]
+  valC      ← M8[PC+1]   # 目标地址
+  valP      ← PC + 9
+  ```
+- Decode：
+  - 不用寄存器：
+  ```
+  srcA = srcB = dstE = dstM = RNONE
+  ```
+- Execute：
+  - 根据条件码决定是否跳转：
+  ```
+  Cnd ← Cond(CC, ifun)
+  ```
+- Memory：
+  - 不访问数据内存。
+- WriteBack：
+  - 无寄存器写回。
+- PC Update：
+  ```
+  PC ← Cnd ? valC : valP
+  ```
+- 这里 同时计算两种可能的下一 PC：顺序的 (valP) 和跳转目标 (valC)，最后在 PC Update 阶段选一个。
+- 这样的好处：逻辑统一，便于后来做流水线时猜测跳转。
+*call Dest —— 调用子程序*
+```asm
+call Dest   # 8 0 Dest(8 字节)
+```
+- 含义：
+  - `PC+9` 压栈（返回地址）
+  - `%rsp -= 8`（栈向低地址生长）
+  - `PC ← Dest`
+- Fetch：
+  ```
+  icode:ifun ← M1[PC]
+  valC      ← M8[PC+1]   # 目标地址
+  valP      ← PC + 9     # 返回地址
+  ```
+- Decode：
+  ```
+  srcA = RNONE
+  srcB = RSP
+  valB ← R[%rsp]
+  dstE = RSP
+  dstM = RNONE
+  ```
+- Execute：
+  - 计算新的栈顶：
+  ```
+  valE ← valB + (-8)   # %rsp - 8
+  ```
+- Memory：
+  - 把返回地址写到新栈顶：
+  ```
+  M8[valE] ← valP
+  ```
+- WriteBack：
+  ```
+  R[%rsp] ← valE
+  ```
+- PC Update：
+  ```
+  PC ← valC
+  ```
+- 这里又是 ALU = 栈指针运算器。
+- 把“返回地址”这种信息放到栈上，是为了支持嵌套调用和递归。
+*ret —— 从子程序返回*
+```asm
+ret   # 9 0
+```
+- 含义：
+  - 从 %rsp 指向的地址读出返回地址
+  - %rsp += 8
+  - PC ← 返回地址
+- Fetch：
+  ```
+  icode:ifun ← M1[PC]
+  valP      ← PC + 1
+  ```
+- Decode：
+  ```
+  srcA = RSP
+  srcB = RSP
+  valA ← R[%rsp]   # 当做读内存地址
+  valB ← R[%rsp]   # 参与 +8 计算
+  dstE = RSP
+  dstM = RNONE     # 这里不写寄存器，只写 PC
+  ```
+- Execute：
+  ```
+  valE ← valB + 8   # 新的 %rsp
+  ```
+- Memory：
+  ```
+  valM ← M8[valA]   # 读返回地址
+  ```
+- WriteBack：
+  ```
+  R[%rsp] ← valE
+  ```
+- PC Update：
+  ```
+  PC ← valM
+  ```
+- 与 call 完全对称：call 是“把返回地址压栈 + PC ← Dest”；
+- ret 是“从栈上取返回地址 + PC ← 取出的地址”。
+
