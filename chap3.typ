@@ -360,7 +360,7 @@ Y86-64 的 processor state 是程序执行过程中 CPU 必须维护的全部可
     | *INS* | 无效指令（bad opcode） |
   ]
   处理器执行检测到错误时将 Stat 改为 ADR 或 INS
-- Memory（DMEM）
+- *Memory（DMEM）*
   - *字节可寻址（byte-addressable）*
   - 按*小端序（little-endian）*存储多字节数据
   - 程序代码与数据都存放在统一的地址空间中
@@ -545,7 +545,7 @@ ifun 决定条件：
   | ------ | ---- | --- | ----- |
   | `rrmovq` | 0    | 无条件 | 否     |
   | `cmovle` | 1    | ≤   | 是     |
-  | `cmovl`  | 2    | <   | 是     |
+  | `cmovl`  | 2    | \<   | 是     |
   | `cmove`  | 3    | =   | 是     |
   | `cmovne` | 4    | ≠   | 是     |
   | `cmovge` | 5    | ≥   | 是     |
@@ -1318,7 +1318,7 @@ ret    9 0
 pushq  A 0 rA F
 popq   B 0 rA F
 ```
-每条指令的第一个字节：icode:ifun，CPU 只要读取第一个字节，就知道整条指令的长度、格式、需要哪些硬件行为。
+每条指令的第一个字节：`icode:ifun`，CPU 只要读取第一个字节，就知道整条指令的长度、格式、需要哪些硬件行为。
 
 ==== SEQ 硬件结构
 
@@ -1354,16 +1354,16 @@ SEQ = 顺序执行一次完成一条指令。不是流水线！
   - rA, rB (如果有)
   - valC（立即数或位移）
   - valP（下一条指令地址 = PC + 指令长度）
-  #three-line-table[
-    | 输出名   | 含义        |
-    | ----- | --------- |
-    | icode | 指令类型      |
-    | ifun  | 指令功能码     |
-    | rA    | 源寄存器编码    |
-    | rB    | 目标寄存器编码   |
-    | valC  | 常数或地址     |
-    | valP  | 本条指令末端的地址 |
-  ]
+    #three-line-table[
+      | 输出名   | 含义        |
+      | ----- | --------- |
+      | icode | 指令类型      |
+      | ifun  | 指令功能码     |
+      | rA    | 源寄存器编码    |
+      | rB    | 目标寄存器编码   |
+      | valC  | 常数或地址     |
+      | valP  | 本条指令末端的地址 |
+    ]
 - Fetch 阶段本质是：解析指令编码。
 *Decode —— 寄存器读（通过寄存器文件）*
 - 寄存器文件有：
@@ -1439,8 +1439,7 @@ SEQ = 顺序执行一次完成一条指令。不是流水线！
 - 降低复杂度——复用
   - 让不同的指令共享尽量多的硬件。
   - 在硬件上复制逻辑块的成本比软件中有重复代码的成本大得多。
-- 我们面临的一个挑战是将每条不同指令所需要的计算放入
-到上述那个通用框架中。
+- 我们面临的一个挑战是将每条不同指令所需要的计算放入到上述那个通用框架中。
 
 *小结*
 - Fetch（取指令）：
@@ -1541,7 +1540,7 @@ SEQ = 顺序执行一次完成一条指令。不是流水线！
     | rA    | 源寄存器编码    |
     | rB    | 目标寄存器编码   |
     | valC  | 常数或地址（立即数/偏移/目标地址）    |
-    | valP  | 本条指令末端的c地址、顺序执行时的下一条指令地址 |
+    | valP  | 本条指令末端的地址、顺序执行时的下一条指令地址 |
   ]
 - Decode 阶段输出：
   - 根据 `icode`，决定
@@ -1554,12 +1553,12 @@ SEQ = 顺序执行一次完成一条指令。不是流水线！
       | dstM | 从内存读出的值应该写入哪个寄存器    |
     ]
   - 然后读寄存器文件，得到：
-  #three-line-table[
-    | 输出   | 含义         |
-    | ---- | ---------- |
-    | valA | srcA 的寄存器值 |
-    | valB | srcB 的值    |
-  ]
+    #three-line-table[
+      | 输出   | 含义         |
+      | ---- | ---------- |
+      | valA | srcA 的寄存器值 |
+      | valB | srcB 的值    |
+    ]
 - Execute 阶段输出：
   #three-line-table[
     | 输出   | 含义                    |
@@ -1886,4 +1885,856 @@ ret   # 9 0
   ```
 - 与 call 完全对称：call 是“把返回地址压栈 + PC ← Dest”；
 - ret 是“从栈上取返回地址 + PC ← 取出的地址”。
+
+== Sequential Implementation
+
+前面我们了解了 CPU 的时序结构，以及 SEQ 处理器的各个阶段和指令解码细节。
+
+#figure(
+  three-line-table[
+    | Roadmap  | CSAPP                                              |
+    | -------- | -------------------------------------------------- |
+    | 基础电路     | 组合逻辑 + 时序逻辑                                        |
+    | 指令集      | Y86-64 ISA                                         |
+    | 划分阶段     | Fetch / Decode / Execute / Memory / Writeback / PC |
+    | *顺序执行* | *SEQ 处理器（现在）*                                    |
+    | HCL 语言   | 用来写“控制逻辑”                                          |
+    | 流水线      | 下一章                                                |
+  ],
+  numbering: none,
+)
+
+*SEQ Hardware Structure*
+
+- *Sequential 的核心思想*
+  - 顺序处理器 = 一条指令，在一个时钟周期内，完整走完所有阶段
+
+#grid(columns: (1fr,) * 2)[
+  #newpara()
+  *State*
+  - Program counter register (PC)
+  - Condition code register (CC)
+  - Register File
+  - Memories
+    - Access same memory space
+    - Data: for reading/writing program data
+    - Instruction: for reading instructions
+  *Instruction Flow*
+  - Read instruction at address
+  *specified by PC*
+  - Process through stages
+  - Update program counter
+][
+  #figure(
+    image("pic/seq-imp.pdf", width: 100%),
+    numbering: none,
+  )
+]
+
+
+*硬件控制语言 Hardware Control Language*
+
+- HCL 用来描述组合逻辑，不会描述时序电路（寄存器内部结构）
+- HCL
+  - Data Types
+    - bool: Boolean
+      - `a, b, c, …`
+    - int: words
+      - `A, B, C, …`
+      - Does not specify word size---bytes, 32-bit words, …
+  - Statements
+    - `bool a = bool-expression;`
+    - `int A = int-expression;`
+- HCL Operations
+  - Boolean Expressions
+    - Logic Operations
+      - `&&`, `||`, `!`
+    - Word Comparisons
+      - `==`, `!=`, `<`, `<=`, `>`, `>=`
+    - Set Membership
+      - `A in {val1, val2, …}`
+  - Word Expressions = MUX
+    - Case expressions
+      - `[condition1 : value1; condition2 : value2; … ];`
+      - Evaluate test expressions `a, b, c, …` in sequence
+      - Return word expression `A, B, C, …` for first successful test
+- *SEQ Hardware*
+  - 我们用 HCL 来描述 CPU 控制逻辑，如 SEQ 或 PIPE 阶段
+  - 蓝色模块：
+    - 已经存在的硬件
+    - ALU、寄存器文件、内存、PC
+  - 灰色模块：
+    - 控制逻辑
+      - ALU 做加法还是减法？
+      - 读哪个寄存器？
+      - 写哪个寄存器？
+      - PC 该怎么更新？
+    - 这些不是“数据计算”，而是“选择 / 决策”
+    - 将这些决策用 HCL 写出来
+#figure(
+  three-line-table[
+    | 元素   | 含义           |
+    | ---- | ------------ |
+    | 蓝色框  | 已有硬件模块       |
+    | 灰色框  | 控制逻辑（HCL 定义） |
+    | 白色椭圆 | 信号名          |
+    | 粗线   | 64-bit 数据    |
+    | 细线   | 小位宽信号        |
+    | 虚线   | 1-bit 控制信号   |
+  ],
+  numbering: none,
+)
+#figure(
+  image("pic/2025-12-23-14-04-37.png", width: 80%),
+  numbering: none,
+)
+
+#note(subname: [回顾])[
+  - Fetch 阶段（取指）
+    - 输入：`PC`
+    - 输出：`icode, ifun, rA, rB, valC, valP`
+    - 硬件：Instruction Memory, PC Incrementer
+    - HCL 控制的点：
+      - 指令长度 → valP 怎么算？
+  - Decode 阶段（读寄存器）
+    - 输入：`rA / rB, icode`
+    - 输出：`srcA / srcB, dstE / dstM, valA / valB`
+    - 硬件：Register File
+    - HCL 决定：
+      - 读哪个寄存器？
+      - 写哪个寄存器？
+  - Execute 阶段（算）
+    - 输入：`valA, valB, valC`
+    - 输出：`valE, Cnd, CC（条件码）`
+    - 硬件：ALU, CC 寄存器
+    - HCL 决定：
+      - ALU 做什么？
+      - A、B 端口接什么？
+  - Memory 阶段（访存）
+    - 输入：`valE, valA / valP`
+    - 输出：`valM`
+    - 硬件：Data Memory
+    - HCL 决定：
+      - 读还是写？
+      - 地址是什么？
+      - 写入数据是什么？
+  - Writeback 阶段
+    - 输入：`valE, valM`
+    - 输出：写回寄存器
+    - HCL 决定：
+      - 写哪个寄存器？
+      - 写 valE 还是 valM？
+  - PC Update（灵魂）
+    - 输入：`valP, valC, valM, Cnd`
+    - 输出：`newPC`
+    - HCL 决定：
+      - 顺序执行？
+      - 跳转？
+      - call / ret？
+]
+
+=== Fetch Logic
+
+Fetch 是第一步，它解决 3 个根本问题：
+- 从哪里读指令？ → PC
+- 指令是什么？ → icode / ifun / rA / rB / valC
+- 下一条指令地址是多少？ → valP
+
+#figure(
+  image("pic/seq-fetch.pdf", width: 80%),
+  numbering: none,
+)
+数据流：
+```
+PC
+ ↓
+Instruction Memory (最多读 10 字节)
+ ↓
+Split（拆出 icode / ifun）
+ ↓
+Align（对齐 rA rB valC）
+ ↓
+生成：
+  icode, ifun, rA, rB, valC, valP
+```
+#newpara()
+*Predefined Blocks*
+- PC（程序计数器）
+  - 类型：寄存器（时序逻辑）
+  - 作用：保存“当前要取的指令地址”
+    ```
+    PC → Instruction memory
+    ```
+  - 在 Fetch 阶段：
+    - PC 只读
+    - 新 PC 要到 PC Update 阶段才写回
+- Instruction Memory（指令存储器）
+  - 功能：从 PC 开始连续读 10 个字节
+    ```
+    M1[PC], M1[PC+1], ..., M1[PC+9]
+    ```
+  - 为什么是 10 字节？Y86-64 指令最长是：
+    #three-line-table[
+      | 组成                  | 字节数    |
+      | ------------------- | ------ |
+      | opcode (icode:ifun) | 1      |
+      | regids (rA:rB)      | 1      |
+      | valC                | 8      |
+    ]
+  - `imem_error` 信号
+    - 若 PC 或 PC+9 超出内存范围：
+    - `imem_error = 1`
+    - 后果：指令无效、后续用 NOP 替代
+- Split：拆 instruction byte
+  - 输入
+    ```
+    Byte 0 = instruction byte
+    ```
+  - 输出
+    ```
+    icode = 高 4 位
+    ifun  = 低 4 位
+    ```
+  - Split 是纯组合逻辑
+- Align：对齐 rA / rB / valC
+  - 为什么需要 Align？
+    - 有些指令 没有 reg byte
+    - 有些指令 没有 valC
+    - valC 必须是 8 字节对齐的整数
+  - Align 的工作是：在固定的 10 字节窗口中，把字段“对齐取出来”
+    #three-line-table[
+      | 信号   | 含义              |
+      | ---- | --------------- |
+      | rA   | 源寄存器 A          |
+      | rB   | 源 / 目的寄存器 B     |
+      | valC | 立即数 / 位移 / 目标地址 |
+    ]
+- PC increment（PC 增量逻辑）
+  - 输入：PC, Need regids, Need valC
+  - 输出：valP（fall-through PC）
+  - 计算规则
+    ```
+    valP = PC + 1
+      + (Need regids ? 1 : 0)
+      + (Need valC ? 8 : 0)
+    ```
+    - 举例：
+      #three-line-table[
+        | 指令     | Need regids | Need valC | valP  |
+        | ------ | ----------- | --------- | ----- |
+        | OPq    | ✓           | ✗         | PC+2  |
+        | irmovq | ✓           | ✓         | PC+10 |
+        | ret    | ✗           | ✗         | PC+1  |
+      ]
+  - valP 是“如果不跳转，下一条指令地址”
+*Control Logic*
+- `Instr_valid`：指令是否合法？
+  - 它检查：
+    - icode 是否在合法集合中
+    - 指令格式是否匹配
+  ```hcl
+  bool instr_valid = icode in {
+      IHALT, INOP, IRRMOVQ, IIRMOVQ,
+      IRMMOVQ, IMRMOVQ, IOPQ,
+      IJXX, ICALL, IRET,
+      IPUSHQ, IPOPQ
+  };
+  ```
+  非法 → 程序状态 = INS
+- Need regids：是否需要寄存器字节？
+  - 决定是否读取 rA:rB
+  ```hcl
+  bool need_regids =
+    icode in { IRRMOVQ, IOPQ, IPUSHQ, IPOPQ,
+               IIRMOVQ, IRMMOVQ, IMRMOVQ };
+
+  ```
+- Need valC：是否需要立即数？
+  - 决定是否读取 valC
+  ```hcl
+  bool need_valC =
+    icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ,
+               IJXX, ICALL };
+  ```
+*异常保护逻辑*
+- icode 的生成
+  ```hcl
+  int icode = [
+      imem_error: INOP;
+      1: imem_icode;
+  ];
+  ```
+  - 如果取指越界：不执行真实指令、强制当成 nop
+  - 否则：使用内存读出的真实 icode
+  - 这是一个 硬件级“异常降级”设计
+- ifun 的生成
+  ```hcl
+  int ifun = [
+      imem_error: FNONE;
+      1: imem_ifun;
+  ];
+  ```
+  - 若地址错误：function code = FNONE
+  - 防止后续逻辑误用垃圾值
+#exercise[
+  For PC value $p$, need_regids value $r$, and need_valC value $i$ , what is the value of the signal valP?
+  - $p+r+8i+1$
+]
+
+=== Decode Logic
+
+Decode 阶段的任务是：
+- 根据 icode，决定要读哪些寄存器（srcA, srcB）
+- 根据 icode，决定要写哪些寄存器（dstE, dstM）
+- 从寄存器文件读出操作数（valA, valB）
+
+#figure(
+  image("pic/seq-decode.pdf", width: 80%),
+  numbering: none,
+)
+数据流：
+```
+rA, rB, icode
+ ↓
+Decode Logic
+ ↓
+生成：
+  srcA, srcB, dstE, dstM
+  ↓
+Register File
+  ↓
+生成：
+  valA, valB
+```
+
+*Register File 的真实接口*
+- 寄存器文件端口：
+  - Read ports A, B
+  - Write ports E, M
+  - 地址 = 寄存器 ID（0–14）或 0xF（RNONE）
+    - 如果地址是 RNONE = 0xF，硬件“什么都不做”
+- 所以 Decode 的核心任务就是：
+  - 给这四个信号赋值：
+    - `srcA`：读端口 A 的寄存器 ID
+    - `srcB`：读端口 B 的寄存器 ID
+    - `dstE`：写端口 E 的寄存器 ID
+    - `dstM`：写端口 M 的寄存器 ID
+*Signals*
+- Cnd: Indicate whether or not to perform conditional move
+  - Cnd 是 Execute 阶段生成的
+  - Cnd 控制条件传送和条件跳转
+*Control Logic*
+- srcA 的生成
+  ```hcl
+  int srcA = [
+    icode in { IRRMOVQ, IRMMOVQ, IOPQ, IPUSHQ } : rA;
+    icode in { IPOPQ, IRET } : RRSP;
+    1 : RNONE;
+  ];
+  ```
+  Decode阶段所有指令的 srcA 选择逻辑
+  #three-line-table[
+    | 指令         | 选择 | 解释 |
+    | :--- | ---- | ---- |
+    | OPq rA rB  | `valA ← R[rA]` | 算术/逻辑操作数 A 来自 rA |
+    | cmovXX rA rB | `valA ← R[rA]` | 条件传送的值来自 rA |
+    | rmmovq rA,D(rB) | `valA ← R[rA]` | 要写到内存的数据来自 rA |
+    | pushq rA   | `valA ← R[rA]` | 要压栈的数据来自 rA |
+    | popq rA    | `valA ← R[%rsp]` | 弹出数据来自栈顶（%rsp） |
+    | ret        | `valA ← R[%rsp]` | 返回地址来自栈顶（%rsp） |
+    | 其他指令      | RNONE | 不读寄存器 |
+  ]
+- srcB 的生成
+  ```hcl
+  int srcB = [
+    icode in { IOPQ, IRMMOVQ, IMRMOVQ } : rB;
+    icode in { IPUSHQ, IPOPQ, ICALL, IRET } : RRSP;
+    1 : RNONE;
+  ];
+  ```
+  Decode阶段所有指令的 srcB 选择逻辑
+  #three-line-table[
+    | 指令           | 选择 | 解释 |
+    | :--- | ---- | ---- |
+    | OPq rA rB    | `valB ← R[rB]` | 算术/逻辑操作数 B 来自 rB |
+    | rmmovq rA,D(rB) | `valB ← R[rB]` | 基址寄存器来自 rB |
+    | mrmovq D(rB),rA | `valB ← R[rB]` | 基址寄存器来自 rB |
+    | pushq rA     | `valB ← R[%rsp]` | 更新栈顶需要用到 %rsp |
+    | popq rA      | `valB ← R[%rsp]` | 更新栈顶需要用到 %rsp |
+    | call Dest    | `valB ← R[%rsp]` | 更新栈顶需要用到 %rsp |
+    | ret          | `valB ← R[%rsp]` | 更新栈顶需要用到 %rsp |
+    | 其他指令        | RNONE | 不读寄存器 |
+  ]
+- dstE 的生成
+  ```hcl
+  int dstE = [
+    icode in { IRRMOVQ } && Cnd : rB;
+    icode in { IIRMOVQ, IOPQ} : rB;
+    icode in { IPUSHQ, IPOPQ, ICALL, IRET } : RRSP;
+    1 : RNONE; # Don't write any register
+  ];
+  ```
+  Decode阶段所有指令的 dstE 选择逻辑
+  #three-line-table[
+    | 指令           | 选择 | 解释 |
+    | :--- | ---- | ---- |
+    | cmovXX rA rB  | `R[rB] ← valE` if Cnd | 条件传送，条件成立时写回 rB |
+    | irmovq V,rB   | `R[rB] ← valE` | 立即数写入 rB |
+    | OPq rA rB    | `R[rB] ← valE` | 算术/逻辑结果写回 rB |
+    | pushq rA     | `R[%rsp] ← valE` | 更新栈顶指针 |
+    | popq rA      | `R[%rsp] ← valE` | 更新栈顶指针 |
+    | call Dest    | `R[%rsp] ← valE` | 更新栈顶指针 |
+    | ret          | `R[%rsp] ← valE` | 更新栈顶指针 |
+    | 其他指令        | RNONE | 不写寄存器 |
+  ]
+- dstM 的生成
+  ```hcl
+  int dstM = [
+    icode in { IMRMOVQ } : rA;
+    icode in { IPOPQ } : rA;
+    1 : RNONE; # Don't write any register
+  ];
+  ```
+  Decode阶段所有指令的 dstM 选择逻辑
+  #three-line-table[
+    | 指令         | 选择 | 解释 |
+    | :--- | ---- | ---- |
+    | mrmovq D(rB),rA | `R[rA] ← valM` | 从内存读值写回 rA |
+    | popq rA      | `R[rA] ← valM` | 弹出值写回 rA |
+    | 其他指令      | RNONE | 不写寄存器 |
+  ]
+
+=== Execute Logic
+
+Execute 阶段的任务是：
+- 根据 icode / ifun，决定 ALU 做什么运算
+- 根据 icode，决定 ALU A、B 端口接什么值
+- 算术、地址、栈指针变化，以及条件是否成立
+  - 算一个结果 valE（通过 ALU）
+  - 决定是否更新条件码 CC
+  - 根据 CC + ifun 计算条件 Cnd
+  - 为后续 Memory / Write-back / PC Update 提供输入
+
+#figure(
+  image("pic/seq-execute.pdf", width: 80%),
+  numbering: none,
+)
+
+数据流：
+```
+valA, valB, valC, icode, ifun
+ ↓
+Execute Logic
+ ↓
+生成：
+  ALU A, ALU B, ALU operation
+  ↓
+ALU
+  ↓
+生成：
+  valE, Cnd
+```
+#newpara()
+*Execute 阶段的 3 个硬件单元（Units）*
+- LU（算术逻辑单元）
+  - ALU 是组合逻辑
+  - 它要支持 Y86-64 需要的 4 个运算：
+    #three-line-table[
+      | alufun | 操作 |
+      | ------ | -- |
+      | ALUADD | 加  |
+      | ALUSUB | 减  |
+      | ALUAND | 与  |
+      | ALUXOR | 异或 |
+    ]
+    对应 OPq 指令的 ifun
+  - 同时 ALU 还会产生：
+    - ZF（Zero）
+    - SF（Sign）
+    - OF（Overflow）
+*CC（Condition Codes，条件码寄存器）*
+- 这是一个寄存器（有状态），保存 3 个 bit：
+  #three-line-table[
+    | 位  | 含义      |
+    | -- | ------- |
+    | ZF | 结果是否为 0 |
+    | SF | 结果是否为负  |
+    | OF | 是否溢出    |
+  ]
+  只有部分指令会更新 CC（例如 `OPq`）
+- *cond（条件判断单元）*
+  - `cond` 是纯组合逻辑，它的作用是：根据 `(ifun, CC)` → 计算 `Cnd`
+    #three-line-table[
+      | 指令     | ifun  | 条件               |
+      | ------ | ----- | ---------------- |
+      | cmovle | FN_LE | (SF ⊕ OF) ∨ ZF   |
+      | jg     | FN_G  | ¬(SF ⊕ OF) ∧ ¬ZF |
+    ]
+  cond 的输出 Cnd 会被：
+  - cmovXX 用来决定是否写寄存器
+  - jXX 用来决定是否跳转
+*Execute 阶段的控制逻辑（Control Logic）*
+- 同一个 ALU，要为不同指令服务所以我们要用 HCL 决定：
+  - ALU 的输入 A 是什么？
+  - ALU 的输入 B 是什么？
+  - ALU 做什么运算？
+  - 要不要写 CC？
+- ALU A 的选择
+  ```hcl
+  int aluA = [
+    icode in { IRRMOVQ, IOPQ } : valA;
+    icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ } : valC;
+    icode in { ICALL, IPUSHQ }: -8;
+    icode in { IRET, IPOPQ } : 8;
+    # Other instructions don't need ALU
+  ];
+  ```
+  - 解释：
+    #three-line-table[
+      | 指令           | aluA 选择 | 解释 |
+      | :--- | ---- | ---- |
+      | OPq rA rB    | valA | `valE ← valB OP valA` |
+      | cmovXX rA rB | valA | `valE ← 0 + valA` |
+      | rmmovq rA,D(rB) | valC | 计算地址：`valE ← valB + valC` |
+      | mrmovq D(rB),rA | valC | 计算地址：`valE ← valB + valC` |
+      | irmovq V,rB   | valC | 立即数：`valE ← 0 + valC` |
+      | call Dest    | -8   | 栈指针变化：`valE ← valB - 8` |
+      | ret          | 8    | 栈指针变化：`valE ← valB + 8` |
+      | pushq rA     | -8   | 栈指针变化：`valE ← valB - 8` |
+      | popq rA      | 8    | 栈指针变化：`valE ← valB + 8` |
+      | 其他指令        | 未使用   |  \    |
+    ]
+- ALU B 的来源
+  ```hcl
+  int aluB = [
+    icode in { IRMMOVQ, IMRMOVQ, IOPQ, ICALL, IPUSHQ, IRET, IPOPQ } : valB;
+    icode in { IRRMOVQ, IIRMOVQ } : 0;
+  ];
+  ```
+  - 涉及寄存器或栈指针 → 用 valB
+  - 只是搬运 / 立即数 → 用 0
+- ALU 运算类型（alufun）
+  ```hcl
+  int alufun = [
+    icode == IOPQ : ifun;
+    1 : ALUADD;
+  ];
+  ```
+  - OPq 指令
+    - ifun 指定：addq / subq / andq / xorq
+    - 所以直接交给 ALU
+  - 其他所有指令
+    - 统一用加法
+    - 地址计算、栈指针更新，本质都是加法
+- Set CC：什么时候更新条件码
+  ```hcl
+  bool set_cc = icode == IOPQ;
+  ```
+
+=== Memory Logic
+
+Memory 阶段的任务是：
+- 如果这条指令需要访问数据内存，就在这里访问；否则什么都不做。
+- 根据 icode，决定是否访问数据内存
+
+#figure(
+  image("pic/seq-memory.pdf", width: 80%),
+  numbering: none,
+)
+
+数据流：
+```
+valE, valA, valP, icode
+ ↓
+Memory Logic
+ ↓
+生成：
+  mem_addr, mem_data, mem_read, mem_write
+  ↓
+Data Memory
+  ↓
+生成：
+  valM
+```
+#newpara()
+*Data memory 模块*
+- 输入
+  - Addr：访问地址
+  - data in：要写入的数据
+  - read / write：控制信号
+- 输出
+  - data out → valM
+- 在 HCL 里我们抽象成：
+  ```
+  valM ← M8[mem_addr]
+  M8[mem_addr] ← mem_data
+  ```
+*Memory 阶段的控制逻辑（Control Logic）*
+- stat：指令状态（是否终止）
+  ```hcl
+  int Stat = [
+    imem_error || dmem_error : SADR;
+    !instr_valid             : SINS;
+    icode == IHALT            : SHLT;
+    1                         : SAOK;
+  ];
+  ```
+  #three-line-table[
+    | 条件               | 含义      |
+    | ---------------- | ------- |
+    | `imem_error`     | 取指越界    |
+    | `dmem_error`     | 数据访存越界  |
+    | `!instr_valid`   | 非法指令    |
+    | `icode == IHALT` | halt 指令 |
+    | 默认               | 正常执行    |
+  ]
+  一旦不是`SAOK`，CPU 停止。
+- mem_read：这条指令要不要读内存？
+  ```hcl
+  bool mem_read = icode in { IMRMOVQ, IPOPQ, IRET };
+  ```
+  #three-line-table[
+    | 指令       | 为什么要读内存  |
+    | -------- | -------- |
+    | `mrmovq` | 从内存读到寄存器 |
+    | `popq`   | 从栈顶读值    |
+    | `ret`    | 从栈顶读返回地址 |
+  ]
+  读出来的结果统一叫`valM`
+- mem_write：这条指令要不要写内存？
+  ```hcl
+  bool mem_write = icode in { IRMMOVQ, IPUSHQ, ICALL };
+  ```
+  #three-line-table[
+    | 指令        | 为什么要写内存     |
+    | --------- | ------------ |
+    | `rmmovq`  | 把寄存器值写到内存   |
+    | `pushq`   | 把寄存器值压栈     |
+    | `call`    | 把返回地址压栈     |
+  ]
+- mem_addr：访问哪个地址？
+  ```hcl
+  int mem_addr = [
+    icode in { IRMMOVQ, IPUSHQ, ICALL, IMRMOVQ } : valE;
+    icode in { IPOPQ, IRET }                    : valA;
+  ];
+  ```
+  #three-line-table[
+    | 指令           | 地址来源 | 解释 |
+    | :--- | ---- | ---- |
+    | rmmovq rA,D(rB) | valE | 计算出的内存地址 |
+    | mrmovq D(rB),rA | valE | 计算出的内存地址 |
+    | pushq rA     | valE | 新栈顶地址 |
+    | popq rA      | valA | 旧栈顶地址 |
+    | call Dest    | valE | 新栈顶地址 |
+    | ret          | valA | 旧栈顶地址 |
+  ]
+- mem_data：写入什么数据？
+  ```hcl
+  int mem_data = [
+    icode in { IRMMOVQ, IPUSHQ } : valA;
+    icode == ICALL              : valP;
+  ];
+  ```
+  #three-line-table[
+    | 指令           | 数据来源 | 解释 |
+    | :--- | ---- | ---- |
+    | rmmovq rA,D(rB) | valA | 要写入内存的数据 |
+    | pushq rA     | valA | 要压栈的数据 |
+    | call Dest    | valP | 返回地址 |
+  ]
+
+=== PC Update Logic
+
+PC Update 阶段的任务是：
+- 计算下一条指令的地址，更新 PC
+- 根据 icode 和条件码 Cnd，决定下一 PC
+- 不同指令类型，PC 更新规则不同
+- 主要分三类：
+  - 顺序执行指令：PC = valP
+  - 条件跳转指令：PC = Cnd ? valC : valP
+  - call / ret 指令：PC = valC / valM
+
+#figure(
+  image("pic/seq-pc.pdf", width: 80%),
+  numbering: none,
+)
+
+数据流：
+```
+valP, valC, valM, icode, Cnd
+ ↓
+PC Update Logic
+  ↓
+生成：
+  new PC
+```
+#newpara()
+
+*PC Update 阶段的控制逻辑（Control Logic）*
+```hcl
+int new_pc = [
+  icode == ICALL : valC;
+  icode == IJXX && Cnd : valC;
+  icode == IRET : valM;
+  1 : valP;
+];
+```
+- call Dest
+  ```hcl
+  icode == ICALL : valC;
+  ```
+  - valC = 指令里直接编码的目标地址
+  - call 本质：无条件跳转
+- jXX Dest 且条件成立
+  ```hcl
+  icode == IJXX && Cnd : valC;
+  ```
+  - Cnd 来自 Execute 阶段
+  - 已经判断了条件码（ZF/SF/OF）
+    - 成功跳转：PC = Dest
+    - 否则：落到默认 valP
+- ret
+  ```hcl
+  icode == IRET : valM;
+  ```
+  - valM = 从内存读出的返回地址
+  - ret 的语义就是：“PC ← pop 出来的值”
+- 默认情况
+  ```hcl
+  1 : valP;
+  ```
+  - 顺序执行：PC 指向下一条指令
+    #three-line-table[
+      | 指令     | 下一条     |
+      | ------ | ------- |
+      | OPq    | PC + 2  |
+      | rmmovq | PC + 10 |
+      | popq   | PC + 2  |
+      | …      | …       |
+    ]
+- 为什么 PC Update 一定放在最后？
+  - PC 的更新依赖于前面所有阶段的计算结果
+    #three-line-table[
+      | PC 更新来源 | 来自哪个阶段  |
+      | ------- | ------- |
+      | valC    | Fetch   |
+      | valP    | Fetch   |
+      | valM    | Memory  |
+      | Cnd     | Execute |
+    ]
+
+=== SEQ Operation
+
+#figure(
+  image("pic/seq-operation.pdf", width: 80%),
+  numbering: none,
+)
+
+*时钟—状态—组合逻辑*
+- 状态（State）只在时钟上升沿更新
+  - State 包括：
+    - PC
+    - 寄存器文件（Register file）
+    - 条件码 CC
+    - 数据内存（Data memory）
+  - 只有在 clock ↑ 的那一瞬间，状态才会改变
+  - 其他时间，状态是“冻结的”
+- 组合逻辑（Combinational logic）一直在“算”
+  - 组合逻辑包括：
+    - ALU
+    - 控制逻辑（HCL 写的那些）
+    - 所有“读端口”（寄存器读、内存读、指令存储器）
+  - 只要 state 一变，组合逻辑立刻重新计算
+  - 不等时钟，不存结果，只“反应”
+- 一个 Cycle =上一条指令的 state 生效 + 下一条指令的组合计算
+
+#figure(
+  image("pic/seq-example.pdf", width: 80%),
+  numbering: none,
+)
+
++ 时钟上升沿刚刚过去
+  - 根据第二个irmovq指令设置的状态集
+  - 组合逻辑开始响应状态变化
++ 下一个上升沿前
+  - 根据第二个irmovq指令设置的状态集
+  - 组合逻辑生成结果用于addq指令
++ 下一个上升沿到来
+  - 根据addq指令设置的状态集
+  - 组合逻辑开始响应状态变化
++ 再下一个上升沿前
+  - 根据addq指令设置的状态集
+  - 组合逻辑生成结果用于下一条指令
+
+=== 小结
+
+*SEQ（Sequential）*
+- SEQ 用一个时钟，让一条指令在一个周期内完整走完 Fetch → Decode → Execute → Memory → Write back → PC update。
+- 通过将执行每条不同指令所需的步骤组织成一个统一的流程，就可以用很少量的各种硬件单元以及一个时钟来控制计算的顺序，从而实现整个处理器。
+
+*SEQ 的核心设计思想（非常重要）*
+- 把“指令执行”拆解成统一流程
+  - 所有指令，本质上都可以表达为同一套阶段，只是每个阶段“有没有事做、算什么”不同。
+- 复用硬件，而不是为每条指令造一套电路
+  - 在硬件中，复制逻辑的成本比软件高得多
+  - 降低复杂度
+- 时钟是分界线
+  - 组合逻辑一直在“算可能发生什么”，但只有在时钟上升沿，状态才真正改变。
+
+*设计思想总结（这几句话值得背下来）*
+- 复用程度不断加深
+- 以空间换时间（但 SEQ 还没做到）
+  - SEQ 做的是：以空间省 → 时间浪费
+  - 而后面的章节（Pipeline）会反过来：增加空间（寄存器、通路），换取时间（更快时钟 & 并行）
+
+*SEQ 最大的问题：慢（而且是结构性地慢）*
+- 在 一个时钟周期内，信号必须走完：
+  ```
+  PC
+  → Instruction memory
+  → Register file
+  → ALU
+  → Data memory
+  → Register file
+  → PC
+  ```
+  - 时钟必须非常慢
+  - ALU、内存、寄存器大部分时间在“等”
+  - 硬件利用率极低
+
+#exercise[
+  以下关于指令执行的描述中哪个是不正确的？
+  - 指令是最小的执行单元
+  - 指令执行是原子操作
+  - 指令是顺序执行的
+  - 不同的指令是由不同功能的电路执行的
+]
+
+#solution[
+  - 「指令是最小的执行单元」 ❌
+    - 在 SEQ 实现里：
+      - 真正被硬件执行的是：Fetch / Decode / Execute / Memory / Write-back
+      - 一条指令被拆成多个阶段
+      - 每个阶段内部还有：ALU 运算、寄存器读写、内存访问
+    - 最小执行单元是：硬件微操作（micro-ops / 信号级计算）
+  - 指令执行是原子操作」 ❌
+    - 时钟上升沿才提交状态
+    - 指令的“效果”来自：
+      - 多个组合逻辑计算
+      - 多个寄存器/内存更新
+    - 指令执行 在时间上是分裂的
+    - 只是 ISA 语义把它“包装成原子”
+  - 「指令是顺序执行的」 ❌
+    - 状态更新是顺序的，但组合逻辑是同时工作的
+    - 状态序列是顺序的，计算是重叠的、并行的
+  - 「不同的指令是由不同功能的电路执行的」 ❌
+    - 这是 SEQ 设计思想的反命题。
+    - 同一个 ALU 既算 addq、又算地址 valB + valC、又算 %rsp ± 8
+    - 同一个 寄存器文件 所有指令共享
+    - 同一个 数据内存 load / store / call / ret 全用它
+    - 区别只在于：控制逻辑（HCL）如何配置数据通路
+]
+
+== Pipeline
 

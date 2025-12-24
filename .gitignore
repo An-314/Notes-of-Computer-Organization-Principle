@@ -2,5 +2,6 @@ files/
 builds/
 *.pdf
 
+!pic/*.pdf
 compile_commands.json
 .cache/
