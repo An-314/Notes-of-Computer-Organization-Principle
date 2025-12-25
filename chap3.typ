@@ -3313,7 +3313,7 @@ Pipeline registers hold intermediate values from instruction execution
     - ret连“预测对/错”的依据都没有
   - 正确做法（CSAPP 方案）：ret不预测，Fetch stall，等 W_valM 出来，再恢复 Fetch
 
-*Pipeline Summary*
+*PIPE- Summary*
 - Concept
   - Break instruction execution into 5 stages
     - Fetch / Decode / Execute / Memory / Write Back
@@ -3338,3 +3338,858 @@ Pipeline registers hold intermediate values from instruction execution
     - 或者说，只能以插入大量nop指令的方式来解决数据冲突、控制冲突
   - PIPE：完整的、高效的、以流水线方式工作的处理器，在PIPE-基础上增加数据转发（数据旁路）以及其它控制逻辑
 ]
+
+=== PIPE
+
+*Overview：PIPE 要“真的能工作”*
+- 从 PIPE- 到 PIPE
+  - demo-h2 / demo-h0
+    - NOP 不够 → 读到旧寄存器值 → 算错
+  - 分支 / ret
+    - 错执行多条指令
+  - PIPE- 的问题不是“没有流水线”，而是：流水线不会“自我保护”
+- PIPE 要做的事只有两件：
+  - 数据冒险时，自动慢下来
+  - 控制冒险时，自动清错
+- Data Hazards（数据冒险）
+  - 后面的指令太早用到了前面指令还没写回的寄存器
+  - 最常见，也是最不想牺牲性能的情况
+- Control Hazards（控制冒险）
+  - 条件分支预测失败
+    - 我们的策略：总预测 taken
+    - naïve pipeline 会错执行 2 条
+  - ret
+    - 返回地址来得最晚
+    - naïve pipeline 会错执行 3 条
+- Making sure it really works
+  - 控制逻辑不能“只考虑一种情况”，stall / bubble / forwarding 可能同时触发
+
+==== Stall
+
+*回顾：为什么“2 个 NOP 不够 / 0 个 NOP 更不行”*
+- Data Dependencies: 2 Nop’s
+  - %rax 在 addq 的 D 阶段 还没写回
+  - Decode 直接从寄存器文件读
+- Data Dependencies: No Nop
+  - %rdx、%rax 都是旧值
+*PIPE 的核心武器①：Stalling（停下来）*
+- Hold instruction in Decode（D 不动）
+  - D 阶段的指令，要读的寄存器，正在被前面的指令“生产”
+  - D 阶段停住，同一条指令，下个周期还在 D，不再往 E 推
+- Inject NOP into Execute（E 注入气泡）
+  - E 阶段 不能空着，但也不能执行错误指令，向 E 阶段塞一个 NOP（bubble）
+- stall D 和 bubble E： 必须成对出现
+
+#figure(
+  image("pic/pipeline-PIPE.pdf", page: 1, width: 80%),
+  numbering: none,
+)
+
+*Stall Condition*
+- Source Registers（谁在“要数据”）
+  - 来自 Decode 阶段的当前指令：`srcA`, `srcB`
+  - 也就是：现在要从寄存器文件读的寄存器
+- Destination Registers（谁在“产数据”）
+  - 来自前面几条指令：`dstE`, `dstM`
+  - 存在于：Execute，Memory，Write-back
+- Stall 的基本条件
+  - *如果 D 阶段要读的寄存器，正在被前面某条还没写回的指令写，那就 stall*
+- 特殊情况：不管 Reg ID = 0xF
+  - 原因非常重要：0xF 表示没有寄存器操作数或 条件传送失败（不写寄存器）
+  - 这是一个“假依赖”，不能因此 stall，否则性能白白损失
+- PIPE 把“人为插 NOP”，变成了“硬件自动 stall + bubble”。
+
+*回到 demo-h2 / demo-h0*
+- Detecting Stall Condition：什么时候判定“要停”？
+  - *如果 D 阶段要读的寄存器，等于前面某条尚未写回的指令的目的寄存器，那就必须 stall。*
+  #figure(
+    image("pic/pipeline-PIPE.pdf", page: 2, width: 80%),
+    numbering: none,
+  )
+- Stalling ×3
+  - %rax 的新值依次存在于：Cycle 4：E_dstE、Cycle 5：M_dstE、Cycle 6：W_dstE
+  - 而 addq 一直在 D 阶段：
+    ```
+    Cycle 4: srcB == E_dstE  → stall
+    Cycle 5: srcB == M_dstE  → stall
+    Cycle 6: srcB == W_dstE  → stall
+    ```
+    直到写回完成，依赖才真正解除
+  #figure(
+    image("pic/pipeline-PIPE.pdf", page: 3, width: 80%),
+    numbering: none,
+  )
+- What Happens When Stalling?
+  + Decode：停住
+    - D 阶段寄存器 不更新
+    - 同一条指令，下个周期还在 D
+  + Fetch：也停住
+    - 因为 Decode 没走
+    - Fetch 不能把新指令推进来
+  + Execute：注入 bubble
+    - E 阶段 不执行真正指令
+    - 插入一个 nop
+  - Bubble = 硬件自动生成的 nop
+    - 它的性质是：不写寄存器、不写内存、不改 CC、只是在流水线里“占时间”
+    - 而且：Bubble 会继续向后流动、像普通指令一样经过 M / W
+*Implementing Stalling*
+
+核心思想：检测逻辑 ≠ 执行逻辑
+
+两个部分：
+- 组合逻辑
+  - 比较 srcA/srcB 和 dstE/dstM
+  - 产生控制信号：
+    - F_stall
+    - D_stall
+    - E_bubble
+- 流水线寄存器的“模式控制”
+  - 每个寄存器都有 3 种模式
+
+#figure(
+  image("pic/2025-12-25-15-52-19.png", width: 80%),
+  numbering: none,
+)
+
+*Pipeline Register Modes* 硬件语义层面的定义
+- Normal（stall=0, bubble=0） 正常更新
+  ```
+  output ← input
+  ```
+- Stall（stall=1） 保持旧值
+  ```
+  output ← output
+  ```
+- Bubble（bubble=1） 注入 NOP
+  ```
+  output ← NOP
+  ```
+  切断错误/危险指令，给前面的指令“腾时间”
+*Stall + Bubble = 用时间换正确性*
+- 原理：让依赖的指令 等到数据真的可用
+- 代价：吞吐量下降
+- 结论：正确，但慢
+
+==== Forwarding
+
+*为什么需要 Data Forwarding（数据转发）*
+- Naive Pipeline 的硬伤
+  - 写回太晚：寄存器要到 W 阶段才更新
+  - 读得太早：操作数在 D 阶段从寄存器文件读
+  - 结果：RAW 依赖必 stall
+- 核心观察（Observation）
+  - 值生成得早（E/M），却被迫等到 W 才能用 —— 浪费。
+- 技巧（Trick）
+  - 不等写回，直接把值“半路递给”需要它的指令。
+  - 这就是 Forwarding / Bypass。
+
+*最直观的例子*
+
+demo-h2（带 nop） 的关键时刻（Cycle 6）：
+- `irmovq $3,%rax` 在 W
+- `W_valE = 3`、`W_dstE = %rax`
+- `addq` 在 D，需要 `%rax` 作为 `srcB`
+- $=>$直接用 `W_valE` 给 `valB`，不必等寄存器文件更新。
+#figure(
+  image("pic/pipeline-PIPE.pdf", page: 4, width: 80%),
+  numbering: none,
+)
+
+*Bypass Paths*
+
+- Decode 阶段的 `valA/valB` 有多种来源：
+  - 寄存器文件（默认）
+  - Execute（E）：`e_valE`
+  - Memory（M）：`M_valE、m_valM`
+  - Write Back（W）：`W_valE、W_valM`
+#figure(
+  image("pic/2025-12-25-16-21-27.png", width: 80%),
+  numbering: none,
+)
+
+*Forwarding Example*
+
+#figure(
+  image("pic/pipeline-PIPE.pdf", page: 5, width: 80%),
+  numbering: none,
+)
+
+在 demo-h0（无 nop） 的关键周期（Cycle 4）：
+- 对 `%rdx`：
+  - 前一条 `irmovq $10,%rdx` 已到 M
+  - 从 M 转发 `M_valE=10` → `valA`
+- 对 `%rax`：
+  - `irmovq $3,%rax` 刚在 E 算出
+  - 从 E 转发 `e_valE=3` → `valB`
+- 同一周期，valA 来自 M，valB 来自 E。
+  - 这正是 forwarding 的威力：零 stall，零 nop。
+
+*Forwarding Priority*
+- 如果 E/M/W 都在写同一个寄存器，怎么办？
+- 规则（必须匹配串行语义）：
+  - 用“最近生成的那个值” ⇢ 来自最早（最靠前）的流水线阶段
+- 优先级（高 → 低）：
+  - E（刚算出来，最新）
+  - M
+  - W
+  - 寄存器文件（最旧）
+- Use matching value from earliest pipeline stage（“earliest”指离 Decode 最近）
+
+#figure(
+  image("pic/pipeline-PIPE.pdf", page: 6, width: 80%),
+  numbering: none,
+)
+
+*Implementing Forwarding*
+- 结构变化
+  - 从 E/M/W pipeline registers
+  - 各拉一组 feedback paths 回到 Decode
+  - 在 Decode 前加 两个选择器：`Sel+Fwd A`，`Sel+Fwd B`
+- 作用
+  - 对 `valA / valB`：
+    - 按优先级在多源中选一个
+    - 没命中再用寄存器文件
+- HCL：`d_valA`
+  ```hcl
+  int d_valA = [
+      # call / jxx：A 取 valP（语义需要）
+      D_icode in { ICALL, IJXX } : D_valP;
+      # Execute 阶段（最高优先级）
+      d_srcA == e_dstE : e_valE;
+      # Memory 阶段
+      d_srcA == M_dstM : m_valM;
+      d_srcA == M_dstE : M_valE;
+      # Write-back 阶段
+      d_srcA == W_dstM : W_valM;
+      d_srcA == W_dstE : W_valE;
+      # 默认：寄存器文件
+      1 : d_rvalA;
+  ];
+  ```
+  - 先 E → 再 M → 再 W：保证拿到最新的值
+  - call/jxx 特判放最前：语义优先于转发
+- 同理 `d_valB`
+  ```hcl
+  int d_valB = [
+      # Execute 阶段（最高优先级）
+      d_srcB == e_dstE : e_valE;
+      # Memory 阶段
+      d_srcB == M_dstM : m_valM;
+      d_srcB == M_dstE : M_valE;
+      # Write-back 阶段
+      d_srcB == W_dstM : W_valM;
+      d_srcB == W_dstE : W_valE;
+      # 默认：寄存器文件
+      1 : d_rvalB;
+  ];
+  ```
+#figure(
+  image("pic/2025-12-25-22-05-13.png", width: 80%),
+  numbering: none,
+)
+
+*Forwarding ≠ 万能：仍需 Stall 的特例*
+- ret
+  - 返回地址来自内存
+  - 到 M/W 才有
+  - Fetch 必须 stall
+- Load/use hazard（mrmov）
+  - 数据 要等内存读完
+  - 紧随其后的使用 至少 1 个 stall
+- 分支预测错误
+  - 要 flush / bubble
+- 异常
+  - 需要清空流水线
+- 结论：Forwarding 是主力，Stall 是兜底。
+- Forwarding 把：“等写回” → “半路直供”
+
+*PIPE 里唯一“Forwarding 也救不了”的数据冒险：Load / Use Hazard（加载–使用冒险）*
+- Load / Use Hazard = 唯一必须 stall 的数据冒险
+- 值从内存出来得太晚，赶不上下一条指令在 Decode 末尾要用。
+  ```asm
+  mrmovq 0(%rdx), %rax   # Load %rax
+  addq   %rbx, %rax     # Use %rax
+  ```
+  #figure(
+    image("pic/2025-12-25-22-42-24.png", width: 80%),
+    numbering: none,
+  )
+  - Cycle 7（关键失败点）
+    - addq 在 Decode
+    - 必须在 Decode 结束前 得到：`valB = %rax`
+    - 但此时：`mrmovq` 还没访问内存
+    - `%rax` 的新值不存在于任何地方，不在 E，不在 M，不在 W
+    - Forwarding 无源可转
+  - Cycle 8（为时已晚）
+    - mrmovq 到 Memory
+    - `m_valM = M[128] = 3` 出现
+    - 但 addq 早就过了 Decode
+    - 错开 1 个周期，无法重叠
+  #three-line-table[
+    | 情况                 | 值什么时候可用    | Forwarding 是否可行 |
+    | ------------------ | ---------- | --------------- |
+    | ALU → use          | E 阶段就有     | ✅               |
+    | ALU → use（隔一条）     | M / W 有    | ✅               |
+    | *Load → use（紧跟）* | *M 阶段才有* | ❌               |
+  ]
+  Load 指令是“慢生产者”
+- 解决方案：Avoiding Load/Use Hazard
+  - 让使用指令“晚一个周期进入 Decode”
+  - Stall using instruction for one cycle：停住 Fetch 和 Decode
+  - Inject bubble into execute stage：给 Execute 塞一个 nop
+  #figure(
+    image("pic/2025-12-25-22-58-09.png", width: 80%),
+    numbering: none,
+  )
+  #three-line-table[
+    | 周期 | mrmovq       | addq           |
+    | -- | ------------ | -------------- |
+    | 7  | M（还没出值）      | D（stall）       |
+    | 8  | M（m_valM 出现） | D（这次能 forward） |
+  ]
+- *Detecting Load/Use Hazard*
+  - 硬件必须“精确识别”的条件
+    ```
+    E_icode ∈ { IMRMOVQ, IPOPQ }   &&
+    E_dstM  ∈ { d_srcA, d_srcB }
+    ```
+  - 如果 Execute 阶段的指令是“读内存写寄存器”，而 Decode 阶段的指令马上要用这个寄存器，那就是 Load/Use Hazard。
+  #figure(
+    image("pic/2025-12-25-23-19-43.png", width: 80%),
+    numbering: none,
+  )
+  - mrmovq 在 E → M 的边界
+  - 此时还没读内存
+  - 是“最后能提前发现”的时刻
+- Control for Load/Use Hazard
+  #three-line-table[
+    | Stage | Action     |
+    | ----- | ---------- |
+    | F     | *stall*  |
+    | D     | *stall*  |
+    | E     | *bubble* |
+    | M     | normal     |
+    | W     | normal     |
+  ]
+
+==== Branch Misprediction
+
+*Branch Misprediction Example*
+```asm
+0x000: xorq %rax,%rax
+0x002: jne t          # Not taken
+0x00b: irmovq $1,%rax # Fall through
+0x015: nop
+0x016: nop
+0x017: nop
+0x018: halt
+0x019: t: irmovq $3,%rdx      # 不该执行
+0x023: irmovq $4,%rcx         # 不该执行
+0x02d: irmovq $5,%rdx         # 不该执行
+```
+- 正确行为：
+  - 只执行前 7 条
+  - Target 分支处的 3 条不应执行
+*为什么 PIPE 一定会“先错执行”？*
+- 所有条件跳转都预测为 taken
+- `jne t` 在 Fetch 阶段
+- 直接把 PC 指向 target
+- 连续 fetch：
+  - `irmovq $2,%rdx`
+  - `irmovq $3,%rbx`
+#figure(
+  image("pic/2025-12-26-00-50-43.png", width: 80%),
+  numbering: none,
+)
+- 什么时候才知道“预测错了”
+  - 条件是否成立（e_Cnd），只能在 Execute 阶段 算出来
+  - `jne` 到 E，ALU + CC → `e_Cnd = 0`（Not taken），此时才发现：预测错了
+*Handling Misprediction*
+- Predict branch as taken
+  - Fetch target 路径
+  - 错是允许的（为了性能）
+- Detect branch not-taken in execute stage
+  - 在 E 阶段 得到 `!e_Cnd`
+- Replace instructions in execute and decode by bubbles
+  - 下一拍：`E_bubble = 1, D_bubble = 1`
+- No side effects have occurred yet
+  - D、E 阶段的指令：还没写寄存器，还没写内存
+  - 所以可以安全丢弃
+*Detecting Mispredicted Branch*
+```
+E_icode = IJXX && !e_Cnd
+```
+- *Execute 阶段是一条条件跳转，而且条件不成立 → 分支预测失败*
+#figure(
+  image("pic/2025-12-26-01-19-25.png", width: 80%),
+  numbering: none,
+)
+*Control for Misprediction*
+#figure(
+  image("pic/2025-12-26-01-25-37.png", width: 80%),
+  numbering: none,
+)
+#three-line-table[
+  | Condition           | F      | D      | E      | M      | W      |
+  | ------------------- | ------ | ------ | ------ | ------ | ------ |
+  | Mispredicted Branch | normal | bubble | bubble | normal | normal |
+]
+- 当 misprediction 被发现时（在某个 cycle）：
+  - E 阶段
+    - 是错误路径上的
+    - 还没产生副作用
+    - 必须 kill（bubble）
+  - D 阶段
+    - 更“年轻”的错误指令
+    - 同样 bubble
+  - F 阶段
+    - F 只是“取指”
+    - 下一拍 PC 已被修正
+    - 不用 bubble
+  - M / W 阶段
+    - 都是：分支之前的老指令，或者分支本身
+    - 不能动
+- 只 bubble “已经进入流水线、但还没产生副作用”的错误指令
+
+==== Return
+
+*为什么 ret 比 branch 更难？*
+- 分支（jxx）的关键点
+  - 分支目标 PC = valC，在 Fetch 就知道目标地址
+  - 条件是否成立：Execute 阶段能算出 ⇒ 错了还能 flush D/E
+- ret 的本质不同
+  - ret 的下一条 PC = 从内存里读出来的值
+  - 而这个值：存在栈顶
+  - 只有在 Memory → Write-back 才真正拿到（W_valM）
+  - Fetch 阶段根本没法预测
+  - Don’t try to predict ret
+- 错误的 ret 会发生什么
+  - 在 naïve PIPE- 里：ret 后面，会错误执行 3 条甚至更多指令
+  - 因为：Fetch 继续往下跑，PC 还没被修正
+*Return Example*
+```asm
+0x000: irmovq Stack,%rsp # Intialize stack pointer
+0x00a: call p # Procedure call
+0x013: irmovq $5,%rsi # Return point
+0x01d: halt
+0x020: .pos 0x20
+0x020: p: irmovq $-1,%rdi # procedure
+0x02a: ret
+0x02b: irmovq $1,%rax # Should not be executed
+0x035: irmovq $2,%rcx # Should not be executed
+0x03f: irmovq $3,%rdx # Should not be executed
+0x049: irmovq $4,%rbx # Should not be executed
+0x100: .pos 0x100
+0x100: Stack: # Stack: Stack pointer
+```
+#newpara()
+*Correct Return Example*
+- 核心策略：*当 ret 在流水线里“还没走完”之前，不允许 Fetch 任何新指令。*
+- As ret passes through pipeline, stall at fetch stage
+  - 只要 ret 还在：D, E, M, F 一律 stall
+  - Fetch 被“冻结”
+- Inject bubble into decode stage
+  - 因为：Fetch 停了，Decode 不能继续推进
+  - 所以：Decode 注入 bubble，防止错误指令进入执行
+- Release stall when reach write-back stage
+  - 当 `ret` 到 W，`W_valM` = 返回地址，PC 已经确定
+  - 解除 Fetch stall，正确返回点开始取指
+#figure(
+  image("pic/2025-12-26-01-49-36.png", width: 80%),
+  numbering: none,
+)
+*Detecting Return*
+- 只要流水线的 D / E / M 任一阶段里有 ret，就认为“正在处理 ret”。
+  ```
+  IRET ∈ { D_icode, E_icode, M_icode }
+  ```
+- 不看 W？
+  - 到 W 的那个周期，已经拿到返回地址，下一个周期可以安全取指
+#figure(
+  image("pic/2025-12-26-01-50-34.png", width: 80%),
+  numbering: none,
+)
+*Control for Return*
+#three-line-table[
+  | Condition      | F         | D          | E      | M      | W      |
+  | -------------- | --------- | ---------- | ------ | ------ | ------ |
+  | Processing ret | *stall* | *bubble* | normal | normal | normal |
+]
+- F stall：不取新指令（PC 不明）
+- D bubble：不让任何指令进入执行
+- E/M/W normal：老指令要走完（ret 本身）
+
+#note(subname: [Special Control Cases])[
+  *Detection*
+  #three-line-table[
+    | Condition           | Trigger                                                   |
+    | ------------------- | --------------------------------------------------------- |
+    | Processing ret      | `IRET ∈ {D_icode, E_icode, M_icode}`                      |
+    | Load/Use Hazard     | `E_icode ∈ {IMRMOVQ, IPOPQ} && E_dstM ∈ {d_srcA, d_srcB}` |
+    | Mispredicted Branch | `E_icode == IJXX && !e_Cnd`                               |
+  ]
+  *Action*
+  #three-line-table[
+    | Condition           | F      | D      | E      | M      | W      |
+    | ------------------- | ------ | ------ | ------ | ------ | ------ |
+    | Processing ret      | stall  | bubble | normal | normal | normal |
+    | Load/Use Hazard     | stall  | stall  | bubble | normal | normal |
+    | Mispredicted Branch | normal | bubble | bubble | normal | normal |
+  ]
+]
+
+*Implementing Pipeline Control*
+
+- 组合逻辑
+- 每个周期根据当前流水线状态生成：`F_stall`, `D_stall`, `D_bubble`, `E_bubble`
+#figure(
+  image("pic/2025-12-26-01-55-27.png", width: 80%),
+  numbering: none,
+)
+- `F_stall`
+  ```hcl
+  bool F_stall =
+    # Load/use
+    E_icode in { IMRMOVQ, IPOPQ } && E_dstM in { d_srcA, d_srcB } ||
+    # ret
+    IRET in { D_icode, E_icode, M_icode };
+  ```
+  - Load/use：必须阻止新指令
+  - ret：PC 未知，必须停
+- `D_stall`
+  ```hcl
+  bool D_stall =
+      E_icode in { IMRMOVQ, IPOPQ } && E_dstM in { d_srcA, d_srcB };
+  ```
+  - 只有 load/use 才需要 D stall
+  - ret 用的是 D bubble
+- `D_bubble`
+  ```hcl
+  bool D_bubble =
+      (E_icode == IJXX && !e_Cnd) ||
+      IRET in { D_icode, E_icode, M_icode };
+  ```
+  - 分支错预测：kill 错误路径
+  - ret：防止 Decode 推进
+- `E_bubble`
+  ```hcl
+  bool E_bubble =
+      (E_icode == IJXX && !e_Cnd) ||
+      E_icode in { IMRMOVQ, IPOPQ } && E_dstM in { d_srcA, d_srcB };
+  ```
+  - 分支错预测
+  - load/use
+
+==== Control Combinations
+
+在前面我们已经分别解决了：
+- 数据相关（forwarding + load/use stall）
+- 分支预测失败（bubble D/E）
+- ret 指令（stall F + bubble D）
+但现实是：
+- 这些情况可能在同一个周期同时发生
+
+#note[
+  三类“特殊事件”的回顾
+  - Load / Use Hazard（加载-使用冒险）
+    ```
+    E_icode in { IMRMOVQ, IPOPQ }
+    && E_dstM in { d_srcA, d_srcB }
+    ```
+    - load 指令的数据 要到 M 阶段末尾才可用
+    - 但下一条指令在 D 阶段末尾就要用
+    - forwarding 来不及
+    #three-line-table[
+      | F     | D     | E      | M      | W      |
+      | ----- | ----- | ------ | ------ | ------ |
+      | stall | stall | bubble | normal | normal |
+    ]
+  - Branch Misprediction（分支预测失败）
+    ```
+    E_icode == IJXX && !e_Cnd
+    ```
+    - 我们 总是预测 taken，到 E 阶段才知道其实 not taken
+    - F、D 里的是“错路径”指令，但 没有产生任何副作用
+    #three-line-table[
+      | F      | D      | E      | M      | W      |
+      | ------ | ------ | ------ | ------ | ------ |
+      | normal | bubble | bubble | normal | normal |
+    ]
+  - ret 指令（最麻烦的）
+    - ret 的下一条 PC 要从内存读，在 M/W 阶段 才知道真正返回地址
+    - 冻结取指（F stall），不断在 D 注入 bubble，直到 ret 到 W 阶段
+    #three-line-table[
+      | F     | D      | E      | M      | W      |
+      | ----- | ------ | ------ | ------ | ------ |
+      | stall | bubble | normal | normal | normal |
+    ]
+]
+
+*Control Combinations*
+- Special cases that can arise on same clock cycle
+  #figure(
+    image("pic/2025-12-26-02-06-07.png", width: 80%),
+    numbering: none,
+  )
+- Comb A
+  - Not-taken branch
+  - ret instruction at branch target
+- Comb B
+  - Instruction that reads from memory to %rsp
+  - Followed by ret instruction
+*Control Combination A（分支失败 + ret）*
+#figure(
+  image("pic/2025-12-26-02-06-52.png", width: 80%),
+  numbering: none,
+)
+```
+E: JXX   （分支，结果 not taken）
+D: ret   （ret 在分支目标路径上）
+```
+- 分支失败：只是 PC 预测错了
+- ret：会改 PC，而且还没算出来
+- Should handle as mispredicted branch
+  - 因为 ret 这条指令本身就是“错路径”上的指令
+  - 分支 not taken，ret 在 branch target，ret 根本不该执行
+  - ret 不应该触发 ret 机制，而应该被 bubble 掉
+  #three-line-table[
+    | Condition   | F     | D      | E      | M      | W      |
+    | ----------- | ----- | ------ | ------ | ------ | ------ |
+    | Processing ret  | stall | bubble | normal | normal | normal |
+    | Mispredicted Branch  | normal | bubble | bubble | normal | normal |
+    | Combination A | stall | bubble | bubble | normal | normal |
+  ]
+  - 像 mispredict 一样处理
+  - bubble 掉 D/E
+  - F stall 是为了配合 PC 选择逻辑（下一周期 PC 会被修正）
+  - *保持正常即可*
+*Control Combination B（Load/use + ret）*
+#figure(
+  image("pic/2025-12-26-02-10-09.png", width: 80%),
+  numbering: none,
+)
+```
+E: Load → 写 %rsp
+D: ret   → 读 %rsp
+```
+例如
+```
+mrmovq 0(%rdx), %rsp
+ret
+```
+- 如果“天真叠加规则”，会发生什么？
+  - Load/use hazard：D stall, E bubble
+  - ret：F stall, D bubble
+- Load/use hazard should get priority
+  - load/use 是 真实数据依赖
+  - ret 是 控制流不确定
+  - 如果让 ret 先 bubble：ret 会被提前推进，%rsp 的值还没准备好，return address 错
+  #three-line-table[
+    | Condition        | F     | D      | E      | M      | W      |
+    | ---------------- | ----- | ------ | ------ | ------ | ------ |
+    | Processing ret   | stall | bubble | normal | normal | normal |
+    | Load/Use Hazard  | stall | stall  | bubble | normal | normal |
+    | Combination B    | stall | stall  | bubble | normal | normal |
+  ]
+  - 优先处理 load/use
+  - ret 必须老老实实多等一个周期
+  - 直观理解：
+    - F：stall（ret 机制）
+    - D：stall 优先于 bubble
+    - E：bubble（load/use）
+  - ret 被卡在 D，等 %rsp 真正可用后再继续
+  - *D_stall 优先于 D_bubble*
+*改 D_bubble 的 HCL*
+```hcl
+bool D_bubble =
+    # Mispredicted branch
+    (E_icode == IJXX && !e_Cnd) ||
+    # ret in pipeline
+    (IRET in { D_icode, E_icode, M_icode }
+     && !(E_icode in { IMRMOVQ, IPOPQ }
+          && E_dstM in { d_srcA, d_srcB }));
+
+```
+当 load/use 和 ret 同时发生时，不允许 D_bubble
+
+*PIPE 小结*
+- 一个完整、正确、可运行、可分析性能的五级流水线 CPU
+- 五级流水线 = 80 年代中期处理器设计的巅峰范式
+  - 1986 – Stanford / Hennessy → MIPS
+  - 1987 – Berkeley / Patterson → RISC → SPARC
+  - Intel 486
+  - 这些全部是五级流水线（IF–ID–EX–MEM–WB）
+  - 后来的 superscalar、OOO、ROB、预测器，都是在这个模型上叠加复杂度。
+- PIPE 到底解决了什么？
+  - Data Hazards（数据冒险）
+    - 绝大多数情况 → Forwarding（数据转发）
+    - 唯一例外：Load / Use Hazard
+      - 必须停 1 拍
+  - Control Hazards（控制冒险）
+    - 分支（branch）
+      - 预测：Always Taken
+      - 发现错误：EX 阶段
+      - 修复方式：D、E 插 bubble，已执行指令无副作用
+      - 代价：2 个 bubble
+    - ret（返回）
+      - 返回地址直到 WB 才知道
+      - 不能预测
+      - 只能：F stall，D bubble，等 ret 到 WB
+      - 代价：3 个 bubble
+  - Control Combinations（最容易被低估的部分）
+*PIPE 的三个核心概念*
+- 延迟（Latency）
+  - 单条指令：5 cycles
+  - 比 SEQ 并没有更快
+- 吞吐量（Throughput）
+  - 几乎每拍完成一条指令
+  - CPI ≈ 1
+  - 这才是流水线存在的意义
+- 冒险（Hazards）
+  #three-line-table[
+    | 类型       | 解决方式              | 代价   |
+    | -------- | ----------------- | ---- |
+    | Data     | Forwarding        | 0    |
+    | Load/use | Stall 1           | 不可避免 |
+    | Branch   | Bubble ×2         | 可优化  |
+    | Ret      | Stall + bubble ×3 | 架构决定 |
+  ]
+
+==== CPI (Cycles Per Instruction)
+
+*CPI 公式*
+$
+  "CPI" = C/I = 1+B/I
+$
+其中：
+- C = 总周期数
+- B = bubble 数
+- I = 完成的指令数
+*三种 penalty 分解*
+$
+  B/I = "LP" + "MP" + "RP"
+$
+- Load/use（LP）
+  - load 占比：0.25
+  - 需要 stall 的 load：0.20
+  - 每次 1 bubble
+  - LP = 0.25 × 0.20 × 1 = 0.05
+- Branch mispredict（MP）
+  - 条件跳转：0.20
+  - 错误率：0.40
+  - 每次 2 bubble
+  - MP = 0.20 × 0.40 × 2 = 0.16
+- Return（RP）
+  - ret 占比：0.02
+  - 每次 3 bubble
+  - RP = 0.02 × 3 = 0.06
+- 总 CPI
+  $
+    "CPI" = 1 + 0.05 + 0.16 + 0.06 = 1.27
+  $
+
+== Modern CPU Design
+
+*从 PIPE 到现代 CPU：抽象升级，而不是推翻*
+- 现代 CPU = PIPE 的思想 × 规模 × 并行度
+
+*现代 CPU 的两个“结构性突破”*
+- *Instruction Control*
+  #figure(
+    image("pic/modern-cpu.pdf", page: 2, width: 80%),
+    numbering: none,
+  )
+  这部分相当于 PIPE 的 Fetch + Decode + 控制逻辑 的超级进化版
+  - Fetch 不再只是 PC+4
+    - 使用分支预测器
+    - 同时预测：分支是否 taken，分支目标地址（BTB）
+  - Decode ≠ 直接执行
+    - PIPE 中：一条指令 → 直接进入 Execute
+    - Modern CPU 中：一条指令 → 拆成多个微操作（uops）
+  - convert register references into tags
+    - 寄存器编号 → 抽象标识符（Tag）
+    - 操作的抽象标识符将某一操作的目标与后续操作的源关联起来
+- *Operations / Execution*
+  #figure(
+    image("pic/modern-cpu.pdf", page: 3, width: 80%),
+    numbering: none,
+  )
+  这部分相当于 PIPE 的 Execute + Memory + Write-back 的超级进化版
+  - 在 PIPE 里：1 个 ALU，1 条指令 = 1 个执行单元
+  - 在现代 CPU 里：
+    - 多个功能单元并行
+    - 一条指令可能拆成 1–3 个 uops
+    - 多条指令的 uops 可以 乱序执行
+  - Out-of-Order Execution（乱序执行）
+    - 指令不再严格按程序顺序执行
+    - 而是根据数据可用性和资源空闲情况动态调度
+  - Register Renaming（寄存器重命名）
+    - 通过使用更多的物理寄存器，消除假依赖
+    - 提高并行度，减少冲突
+  - Speculative Execution（推测执行）
+    - 基于预测结果提前执行指令
+    - 如果预测正确，节省时间；如果错误，丢弃结果
+#figure(
+  image("pic/modern-cpu.pdf", page: 1, width: 80%),
+  numbering: none,
+)
+
+*Multiple Instructions Can Execute in Parallel*
+- 现代 CPU 每个周期不是“执行一条指令”，而是“调度很多操作”
+- 例如（Haswell）：
+  #three-line-table[
+    | 功能     | 数量 |
+    | ------ | -- |
+    | Load   | 2  |
+    | Store  | 1  |
+    | 整数 ALU | 4  |
+    | FP 乘   | 2  |
+    | FP 加/除 | 1  |
+  ]
+  理论上一个周期可以同时：2 次 load，1 次 store，4 个整数运算，2 个 FP 乘法
+- Latency ≠ Throughput（非常重要的概念升级）
+  #three-line-table[
+    | 指令      | Latency | Cycles / Issue |
+    | ------- | ------- | -------------- |
+    | Load    | 4       | 1              |
+    | Int Mul | 3       | 1              |
+    | FP Mul  | 5       | 1              |
+    | FP Div  | 10–15   | 6–11           |
+  ]
+  - Latency：一条操作从开始到结束要多久
+  - Issue Rate：多久能再发射一条同类操作
+  - 即使一条 FP 乘要 5 个周期完成：每个周期仍然可以再发射一条新的 FP 乘
+*Haswell Operation：uops + Out-of-Order*
+
+- 什么是 uop？
+  - $~$118 bits
+  - 包含：操作类型，两个源，一个目的
+  - 本质上是：“比 ISA 指令更底层的操作描述”
+- Out-of-Order Engine 在干什么？
+  - uop 不按程序顺序执行，而是：源操作数 ready & 功能单元空闲，就立刻执行。
+  - 这和在 PIPE 里：“必须等前面指令通过某个阶段”是根本不同的模型。
+- Reservation Stations（预约站）
+  - 这是 PIPE forwarding/stall 的“终极进化版”：
+    - 记录：
+      - 哪些 uop 依赖谁
+      - 哪些操作数 ready
+      - 动态分配功能单元
+      - 完全消灭大多数 stall
+
+*分支预测*
+- 在 PIPE 里算过：
+  - 分支预测错 → 2 个 bubble
+  - ret → 3 个 bubble
+- 在现代 CPU 里：
+  - 一次预测失败 ≈ 11–15 个周期的损失
+- *Branch Target Buffer（BTB）*
+  - 512 项
+  - 每项 4-bit history
+  - 能识别模式：
+    - T / NT 交替
+    - loop 末尾跳转
+- 状态机
+  - 这是2-bit 饱和计数器的升级版：
+  - 连续几次 taken 才改预测
+  - 对偶发异常不敏感
+  - 本质思想：“程序是有行为模式的”
