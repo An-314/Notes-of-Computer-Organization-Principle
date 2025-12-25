@@ -2738,3 +2738,603 @@ int new_pc = [
 
 == Pipeline
 
+*把指令执行拆成阶段*
+- 不同指令看起来不同，但本质流程高度相似
+- 降低硬件复杂度
+  - 让不同的指令共享尽量多的硬件
+  - 在硬件上复制逻辑块的成本比软件中有重复代码的成本大得多
+- 怎么做？——阶段化（Stage Decomposition）
+  - 把一条指令拆成 6 个阶段
+  - 取指（IF）：
+    - 从内存读指令
+    - 计算 valP = PC + instr_len
+  - 译码（ID）：
+    - 读寄存器
+    - 符号扩展立即数
+  - 执行（EX）：
+    - ALU 运算（算结果 / 地址 / SP）
+  - 访存（MEM）：
+    - 读 / 写数据内存
+  - 写回（WB）：
+    - 把结果写回寄存器
+  - 更新 PC（PC）：
+    - 选择下一条 PC（顺序 / 分支 / ret）
+
+*流水线的总览结构*
+- General Principles of Pipelining
+  - Goal（目标）：提高吞吐量（单位时间完成更多指令）
+  - Difficulties（困难）：数据冒险、控制冒险、结构冒险
+- Creating a Pipelined Y86-64 Processor
+  - Rearranging SEQ
+    - 把原来“一坨组合逻辑”的 SEQ 拆成 5~6 段
+  - Inserting pipeline registers
+    - 在每两个阶段之间插寄存器（F/D/E/M/W）
+  - Problems with hazards
+    - 前后指令“互相影响”，这是流水线的代价
+- 流水线不是让一条指令更快完成，而是让更多指令“同时在路上”。
+  - 流水线提高的是吞吐量（Throughput）
+  - 不是单条指令的延迟（Latency）
+
+=== Pipelining Principles
+
+*Computational Example*
+- 系统参数
+  - 组合逻辑总延迟：300 ps
+  - 寄存器写入开销：20 ps
+  - 最小时钟周期 = 300 + 20 = 320 ps
+- 吞吐量
+  - Throughput = 1 / Cycle time = 1 / 320 ps = 3.12  GIPS
+- 总延迟
+  - Delay = 320 ps
+
+#figure(
+  image("pic/pipeline-example.pdf", page: 1, width: 80%),
+  numbering: none,
+)
+
+*3 级流水线：理想均匀划分*
+- 划分方式
+  - 组合逻辑拆成 A / B / C
+  - 每段：100 ps
+  - 每段后接一个寄存器：20 ps
+- 单级时钟周期
+  - Cycle time = 100 + 20 = 120 ps
+- 吞吐量
+  - Throughput = 1 / 120 ps = 8.33 GIPS
+- 总延迟
+  - Delay = 3 × (100 + 20) = 360 ps
+
+#figure(
+  image("pic/pipeline-example.pdf", page: 2, width: 80%),
+  numbering: none,
+)
+
+- *吞吐量 vs 延迟*
+  - 吞吐量
+    - 每 120 ps 就可以启动一个新操作
+    - 稳态下：Throughput = 8.33 GIPS
+  - 延迟
+    - 一条操作要经过 A → B → C → 写回
+    - 总延迟：Delay = 360 ps
+    - 延迟反而变大了！
+
+*时间图：同时处理 3 个操作*
+
+#figure(
+  image("pic/pipeline-example.pdf", page: 3, width: 80%),
+  numbering: none,
+)
+
+- 未流水（Unpipelined）
+  - OP1 完成 → OP2 才能开始
+  - 任何时刻只有 1 个操作在系统里
+- 3-way 流水线
+  - OP1 在 B
+  - OP2 在 A
+  - OP3 可能已经进来
+  - 最多 3 个操作“同时在路上”
+
+#figure(
+  image("pic/pipeline-example.pdf", page: 4, width: 80%),
+  numbering: none,
+)
+
+*局限*
+- *非均匀划分*
+  - 新划分
+    - A：50 ps
+    - B：150 ps
+    - C：100 ps
+    - 每级寄存器：20 ps
+  - 时钟周期
+    - Cycle time = 150 + 20 = 170 ps
+    - 流水线速度被最慢阶段 B 拖死
+  - 吞吐量
+    - Throughput = 1 / 170 ps = 5.88 GIPS
+  - 总延迟
+    - Delay = 50 + 150 + 100 + 3 × 20 = 360 ps
+
+  #figure(
+    image("pic/pipeline-example.pdf", page: 5, width: 80%),
+    numbering: none,
+  )
+- *继续加深流水线：寄存器开销开始反噬*
+  - 极端情况：把逻辑切得非常细
+    - 每段逻辑：50 ps
+    - 每级寄存器：20 ps
+  - 后果
+    - 寄存器时间占比急剧上升：
+      #three-line-table[
+        | 流水级数 | 寄存器开销占比 |
+        | ---- | ------- |
+        | 1 级  | 6.25%   |
+        | 3 级  | 16.67%  |
+        | 6 级  | 28.57%  |
+      ]
+  - 寄存器成了瓶颈，而不是逻辑
+  #figure(
+    image("pic/pipeline-example.pdf", page: 6, width: 80%),
+    numbering: none,
+  )
+
+*Data Dependency*
+- Data Dependencies（数据相关）：这是“程序本身”的属性
+- 每个操作依赖前一个操作的结果
+  - Data dependency ≠ 流水线的问题
+  - 它在 顺序执行（SEQ） 中就已经存在
+
+#figure(
+  image("pic/pipeline-example.pdf", page: 7, width: 80%),
+  numbering: none,
+)
+- OP2 需要 OP1 的输出
+- OP3 需要 OP2 的输出
+- 在未流水化系统中：
+  - OP1 完成 → 结果写回 → OP2 再开始
+  - 一切都“来得及”
+  - 数据相关本身不会导致错误
+*Data Hazard*
+- Data Hazards（数据冒险）：这是“流水线引入的问题”
+- 结果还没来得及“走回去”，下一条指令就已经开始用了
+- 在流水线中：
+  - OP1 的结果：
+    - 可能在 C 阶段 / WB 阶段 才真正产生
+  - OP2：
+    - 在 A / B 阶段（ID / EX） 就已经需要这个结果
+    - 时间顺序被打乱了：指令仍然“逻辑上顺序”，但“硬件执行上重叠”
+  - 于是：正确的程序，在流水线上可能算错
+#figure(
+  image("pic/pipeline-example.pdf", page: 8, width: 80%),
+  numbering: none,
+)
+- 正常期望（顺序语义）
+  ```
+  OP1:  produce result
+  OP2:            consume result
+  ```
+- 流水线实际发生的事
+  ```
+  Cycle N:   OP1 在 B
+  Cycle N+1: OP1 在 C, OP2 已经在 A
+  ```
+  OP2 读取寄存器时，OP1 还没写回
+- 这就是：Read After Write (RAW) Hazard
+*Data Dependencies in Processors*
+```asm
+1 irmovq $50, %rax
+2 addq %rax , %rbx
+3 mrmovq 100( %rbx ), %rdx
+```
+- 指令间依赖关系
+  - 指令 2 读取 %rax
+    - 但 %rax 是指令 1 写的
+  - 指令 3 读取 %rbx
+    - 但 %rbx 是指令 2 写的
+  - 两个都是 RAW（Read After Write
+- 如果是 SEQ（顺序执行）：永远正确
+- 如果是 Pipeline（还没加任何保护）
+  - 指令 2 在 ID 阶段 就读 %rax
+  - 但指令 1 可能还在 EX / MEM
+  - 读到的是旧值
+
+=== 从SEQ到Pipeline
+
+*SEQ Hardware（顺序实现）*
+- 所有阶段的组合逻辑连成一条长路径
+- 一个时钟周期内，只服务一条指令
+- PC → Fetch → Decode → Execute → Memory → Write back → 更新 PC 一次性全部做完
+
+#grid(columns: (1fr,) * 2)[
+  #figure(
+    image("pic/2025-12-23-14-04-37.png", width: 100%),
+    numbering: none,
+  )
+][
+  #figure(
+    image("pic/2025-12-24-20-42-42.png", width: 100%),
+    numbering: none,
+  )
+]
+
+*SEQ+ Hardware：为流水线“清路”*
+- 关键变化：PC 阶段前移
+  - 还是序列执行
+  - PC 阶段前移
+- 在 SEQ 中：
+  - PC 是一个状态寄存器
+  - 新 PC 在 一条指令的最后 才算出来
+  - 下一条指令必须等上一条“彻底结束”
+- 在 SEQ+ 中
+  - 把 PC 选择逻辑挪到最前面
+  - 当前指令用的 PC，来自：一条指令已经算好的信息
+  - 也就是：*当前 PC = 上一条指令的“遗产”*
+- PC Stage
+  - PC是多路选择器的结果，比如：
+    - 顺序执行：valP
+    - 分支成功：valC
+    - ret：valM
+- Processor State 的变化
+  - PC 不再是作为状态寄存器存在
+  - 它可以由：pipeline register 里保存的信息，控制逻辑，执行结果共同决定
+  - 这是为了下一步做铺垫：PC 也要流水化
+- *为 Pipeline 做“拓扑清理”*
+*Adding Pipeline Registers：真正进入 Pipeline*
+- 阶段不再是“逻辑顺序”，而是“物理分段”
+- Pipeline Register 的作用（一定要会一句话解释）
+  - 把一个时钟周期内的计算结果，冻结下来，交给下一阶段在下一个周期使用
+  - F → D → E → M → W
+  - 每个箭头中间，都有一个寄存器
+*Pipeline Stages（五级流水线的标准定义）*
+- *Fetch（取指）*
+  - 选择当前 PC
+  - 从指令内存读指令
+  - 计算 `valP = PC + instr_len`
+- *Decode（译码）*
+  - 从寄存器文件读 `valA / valB`
+  - 决定：
+    - `srcA / srcB`
+    - `dstE / dstM`
+- *Execute（执行）*
+  - ALU 运算：
+    - 算数
+    - 地址
+    - 栈指针
+  - 设置条件码（CC）
+- Memory（访存）
+  - 读 / 写数据内存
+  - 典型指令：
+    - `mrmovq`
+    - `rmmovq`
+    - `call / ret`
+- Write Back（写回）
+  - 把 `valE / valM` 写回寄存器文件
+
+#figure(
+  image("pic/2025-12-24-20-59-53.png", width: 100%),
+  numbering: none,
+)
+
+注意：
+- PC 选择逻辑必须提前，否则无法流水
+- 流水线 = 组合逻辑 + pipeline registers
+- 阶段定义是功能划分，不是指令类型划分
+- 一切 hazard，都是因为这些阶段“同时在工作”
+为什么到了 Pipeline，PC 必须在最前面？
+- Pipeline 的本质前提：同一个时钟周期内，有多条指令同时处在不同阶段
+- Fetch 阶段“第一件事”是必须立刻知道 PC，才能取指
+  - Fetch 在 周期一开始就要工作
+  - 它不能等 Execute / Memory 算完
+- 如果 PC update 还在“最后”
+  - 当前周期：Fetch 阶段需要 PC
+  - 但 PC 的计算：要等某条指令走到 Execute / Memory，那是 本周期后半段，甚至下周期
+- Pipeline 中 PC 的真实语义已经变了
+  - 在 Pipeline 中：*PC 不再是“本条指令算出来的”，而是“对未来指令的预测或修正”*
+  - Fetch 用的是：predPC（预测 PC）
+  - 之后某个周期：Execute / Memory 才发现预测错了，再回滚/修正 PC
+
+=== PIPE- Hardware
+
+Pipeline registers hold intermediate values from instruction execution
+- 在 PIPE 中：每个阶段都有自己的“状态寄存器”
+  - 同一时刻：F / D / E / M / W 都是不同指令
+  - 所以不是“一条指令的流动”，而是：多条指令的“时间切片叠加”
+- Pipeline Registers：它们到底存什么？
+  - F / D / E / M / W 每一个都代表一个 pipeline register，里面存的是：“某条指令，在这个阶段结束时，算出来的一切中间结果”
+- Forward (Upward) Paths
+  - Values passed from one stage to next
+  - Cannot jump past stages
+  - 流水线里 合法的数据流只有一种：
+    ```
+    F → D → E → M → W
+    ```
+  - 例子：为什么 valC 不能“跳级”？
+    - valC 是 Fetch 阶段解析出来的立即数
+    - Decode，Execute，Memory都可能需要它
+    - 所以它必须：
+      ```
+      F_valC → D_valC → E_valC → M_valC → W_valC
+      ```
+      即使某个阶段“不用”，也要带着走
+- Signal Naming Conventions
+  - 两种前缀的含义
+    - `S_Field`：存储在 S 阶段 pipeline register 里的值
+    - `s_Field`：在 S 阶段组合逻辑中，刚刚算出来的值
+  - 为什么信号的要带上阶段的名字作为前缀
+    - 在 SEQ 中，不同阶段共享一套信号
+    - 在PIPE中，不同阶段执行的是不同的指令（信号名称要带上阶段区分）
+
+#figure(
+  image("pic/2025-12-24-22-46-26.png", width: 80%),
+  numbering: none,
+)
+
+*Feedback Paths*
+
+#figure(
+  image("pic/2025-12-24-23-28-23.png", width: 80%),
+  numbering: none,
+)
+
+- *Predicted PC（预测 PC）*
+  - Guess value of next PC
+  - Fetch 阶段：必须立刻有 PC，但：分支是否跳转，ret 的返回地址，都要到后面阶段才知道
+  - 所以：Fetch 用 预测 PC，后面阶段发现错了 → 纠正 + flush
+- *Branch information（分支信息回流）*
+  - Jump taken / not-taken
+  - Fall-through or target address
+  - Execute 阶段：ALU + CC 才知道条件是否成立
+  - 但 Fetch 已经跑了好几拍
+  - 把 Cnd、valC 等信息回送，用来修正 PC
+- *Return point（ret 的返回地址）*
+  - Read from memory
+  - 这是最麻烦的一种控制冒险：
+  - ret 的返回地址：必须从内存读，在 M 阶段才知道
+  - 所以：PC 要从 M_valM 回送到 Fetch
+- *Register updates（写回 & forwarding）*
+  - To register file write ports
+  - 这部分红线既用于：正常写回（W 阶段）
+  - 也用于：数据转发（forwarding）
+  - 例如：E 阶段需要的操作数，可能来自：E_valE、M_valE、M_valM、W_valE、W_valM
+  - 这就是为什么 Decode/Execute 周围线最多
+
+*Predicting the PC*
+
+#figure(
+  image("pic/2025-12-25-01-45-40.png", width: 80%),
+  numbering: none,
+)
+
+- 为什么必须“预测 PC”
+  - Fetch 阶段结束后，立刻要开始下一次 Fetch
+    - 分支是否跳转 → Execute / Memory 才知道
+    - ret 的返回地址 → Memory / Write-back 才知道
+  - 在当前指令完成后开始获取新指令，时间不足以可靠地确定下一条指令
+  - 猜接下来会执行哪条指令，若预测错误则恢复
+- Predict PC
+  - `PC increment`
+    - 计算：`valP = PC + instr_len`
+    - 用于：普通顺序指令，分支失败时的回退地址
+  - `Predict PC`
+    - 这是一个组合逻辑模块，根据 f_icode 决定：用 valP？用 valC？还是“未知”（ret）
+    - 它输出：`predPC`
+  - `Select PC`
+    - 这是 最终裁决者：
+    - 它要在以下来源中选一个：
+      - `predPC`（正常预测）
+      - `M_valA`（分支预测失败纠错）
+      - `W_valM`（ret 返回地址）
+- *预测策略*
+  - 不改变控制流的指令
+    - `OPq / irmovq / rmmovq / mrmovq`
+    - 预测：`PC = valP`
+    - 永远正确
+  - Call & 无条件跳转
+    - `call / jmp`
+    - 预测：`PC = valC`
+    - 永远正确
+  - 条件跳转（JXX）
+    - 策略：总是预测跳转
+    - 预测：`PC = valC`
+    - 正确率：约 60%
+      - 错了怎么办？之后纠错
+      - 注意：这是 CSAPP 为了教学故意选的“简单但不完美”策略
+  - Return（RET）
+    - 不预测
+    - 原因：返回地址在栈里，要等内存读完才知道
+    - 直接暂停 Fetch（stall）
+- *什么时候、怎么纠错？*
+  - 分支预测失败（最常见）
+    - 什么时候发现？
+      - 当 JXX 指令走到 Memory 阶段
+      - 已经有：M_Cnd（条件是否成立）
+      - 如果：`M_icode == IJXX && !M_Cnd`
+      - 说明：预测跳转 ❌ 实际不跳 ✔
+    - 正确 PC 是什么？
+      - `fall-through PC = valP`
+      - 而这个 valP：在流水线中，被一路带到了 M_valA
+      - 所以纠错用：`PC = M_valA`
+  - Return 指令（最麻烦）
+    - 返回地址在哪里？
+      - 从栈里读
+      - 直到 W 阶段才稳定
+      - 所以：`PC = W_valM`
+    - 在此之前：
+      - Fetch 停止
+      - 不乱猜
+- *把策略翻译成“优先级规则”*
+  - PC 选择优先级（从高到低）：
+    - ret 返回地址 → `W_valM`
+    - 分支预测失败纠错 → `M_valA`
+    - call / jxx 的预测目标 → `f_valC`
+    - 默认顺序执行 → `f_valP`
+  - 纠错 > 预测 > 默认
+- `f_pc`
+  ```hcl
+  int f_pc = [
+      # 1. ret：最高优先级
+      W_icode == IRET : W_valM;
+      # 2. 分支预测失败纠错
+      M_icode == IJXX && !M_Cnd : M_valA;
+      # 3. call / jxx：预测跳转
+      f_icode in {ICALL, IJXX} : f_valC;
+      # 4. 默认：顺序执行
+      1 : f_valP;
+  ];
+  ```
+
+*NOP and Data Dependencies*
+- 最简单的情况：完全无相关（demo-basic.ys）
+  ```asm
+  irmovq $1,%rax
+  irmovq $2,%rcx
+  irmovq $3,%rdx
+  irmovq $4,%rbx
+  halt
+  ```
+  - 每条指令都 互不依赖，没有分支，没有 ret，没有 load/use
+  - 结果：流水线 完美填满
+  - 结论 0（基线）：只要没有 hazard，PIPE ≈ 理想 1 IPC
+  #figure(
+    image("pic/pipeline-PIPE-.pdf", page: 1, width: 80%),
+    numbering: none,
+  )
+- 数据相关：为什么需要 3 个 NOP（demo-h3.ys）
+  ```asm
+  irmovq $10,%rdx
+  irmovq $3,%rax
+  nop
+  nop
+  nop
+  addq %rdx,%rax
+  ```
+  - 关键依赖，`addq` 需要：
+    - `%rdx` ← 第 1 条
+    - `%rax` ← 第 2 条
+  - 但在这个 PIPE 里：
+    - 寄存器只在 W 阶段才写回
+    - Decode 阶段读寄存器
+  - 结论 1：在“没有 forwarding、没有 stall”的流水线中，*必须手工插 nop*，等到写回完成
+  #figure(
+    image("pic/pipeline-PIPE-.pdf", page: 2, width: 80%),
+    numbering: none,
+  )
+- 为什么 2 个 NOP 不够（demo-h2.ys）
+  ```asm
+  irmovq $10,%rdx
+  irmovq $3,%rax
+  nop
+  nop
+  addq %rdx,%rax
+  ```
+  - 关键错误
+    - addq 在 D 阶段：
+      - %rdx（已经写回）
+      - %rax（还没写回）
+  - 图里的 Error 就是：`valB ← R[%rax] = 0`
+  - 结论 2：差一个 cycle 都不行，RAW hazard 是严格的“时序问题”，不是逻辑问题
+  #figure(
+    image("pic/pipeline-PIPE-.pdf", page: 3, width: 80%),
+    numbering: none,
+  )
+- 1 个 NOP：两个操作数都错（demo-h1.ys）
+  ```asm
+  irmovq $10,%rdx
+  irmovq $3,%rax
+  nop
+  addq %rdx,%rax
+  ```
+  - 两个操作数都读错
+    - %rdx ← 还没写回
+    - %rax ← 还没写回
+  #figure(
+    image("pic/pipeline-PIPE-.pdf", page: 4, width: 80%),
+    numbering: none,
+  )
+- 0 个 NOP：四个操作数都错（demo-h0.ys）
+  ```asm
+  irmovq $10,%rdx
+  irmovq $3,%rax
+  addq %rdx,%rax
+  ```
+  - 四个操作数都读错
+    - %rdx ← 还没写回
+    - %rax ← 还没写回
+  #figure(
+    image("pic/pipeline-PIPE-.pdf", page: 5, width: 80%),
+    numbering: none,
+  )
+- *分支预测失败*：为什么会“多执行 3 条指令”（demo-j.ys）
+  ```asm
+  0x000: xorq %rax,%rax
+  0x002: jne t # Not taken
+  0x00b: irmovq $1, %rax # Fall through
+  0x015: nop
+  0x016: nop
+  0x017: nop
+  0x018: halt
+  0x019: t: irmovq $3, %rdx # Target (Should not execute)
+  0x023: irmovq $4, %rcx # Should not execute
+  0x02d: irmovq $5, %rdx # Should not execute
+  ```
+  - 预测策略回顾
+    - JXX：总是预测跳转
+    - Fetch 直接去 valC（target）
+  - 时间线发生了什么？
+    - jne 在 Execute / Memory 才知道：`M_Cnd = 0（不跳）`
+    - 但这时：Target 的 3 条指令已经进入流水线，分别在 F / D / E
+  - 在分支目标处错误执行3条指令
+- *Return预测失败*：为什么比分支更糟（demo-ret.ys）
+  ```asm
+  0x000: irmovq Stack,%rsp # Intialize stack pointer
+  0x00a: nop # Avoid hazard on %rsp
+  0x00b: nop
+  0x00c: nop
+  0x00d: call p # Procedure call
+  0x016: irmovq $5,%rsi # Return point
+  0x020: halt
+  0x020: .pos 0x20
+  0x020: p: nop # procedure
+  0x021: nop
+  0x022: nop
+  0x023: ret
+  0x024: irmovq $1,%rax # Should not be executed
+  0x02e: irmovq $2,%rcx # Should not be executed
+  0x038: irmovq $3,%rdx # Should not be executed
+  0x042: irmovq $4,%rbx # Should not be executed
+  0x100: .pos 0x100
+  0x100: Stack: # Initial stack pointer
+  ```
+  - ret 的致命问题
+    - 返回地址在：
+      - 栈内存
+      - 直到 M / W 阶段 才知道
+  - 如果“天真地继续取指”
+    - 在ret指令之后错误地执行3条指令
+    - ret连“预测对/错”的依据都没有
+  - 正确做法（CSAPP 方案）：ret不预测，Fetch stall，等 W_valM 出来，再恢复 Fetch
+
+*Pipeline Summary*
+- Concept
+  - Break instruction execution into 5 stages
+    - Fetch / Decode / Execute / Memory / Write Back
+  - Run instructions through in pipelined mode
+    - 这是在改变“时间组织方式”
+    - 流水线不是新功能，是新调度方式
+- Limitations：PIPE-的弊端
+  - Data dependency（数据冒险）
+    - One instruction writes register, later one reads it
+    - 根本原因（结构性延迟）：Decode 阶段读寄存器，Write-back 阶段才写寄存器，中间隔了 3 个周期
+  - Control dependency（控制冒险）
+    - 包括两类：分支预测失败、return
+- Fixing the Pipeline
+  - PIPE- 是正确的，但是低效的
+  - 靠的是：插 nop、人工规避 hazard
+
+#note(subname: [处理器的不同名称])[
+  - SEQ：完整的、顺序执行指令的处理器
+  - SEQ+：完整的、顺序执行指令的处理器，在SEQ基础上重新安排计算阶段（PC更新阶段在一个时钟周期的开始）
+  - PIPE-：完整的、以流水线方式工作的处理器，在SEQ+的基础上增加流水线寄存器以及其它控制逻辑
+    - 无法解决数据冲突、控制冲突
+    - 或者说，只能以插入大量nop指令的方式来解决数据冲突、控制冲突
+  - PIPE：完整的、高效的、以流水线方式工作的处理器，在PIPE-基础上增加数据转发（数据旁路）以及其它控制逻辑
+]
