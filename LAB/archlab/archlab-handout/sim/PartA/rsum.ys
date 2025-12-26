@@ -1,0 +1,61 @@
+# rsum.ys - Recursive version of sum_list
+#
+# /* rsum_list - Recursive version of sum_list */
+# long rsum_list(list_ptr ls)
+# {
+#     if (!ls)
+# 	return 0;
+#     else {
+# 	long val = ls->val;
+# 	long rest = rsum_list(ls->next);
+# 	return val + rest;
+#     }
+# }
+#
+
+    .pos 0
+    irmovq stack, %rsp        # init stack pointer
+    irmovq ele1, %rdi         # arg1: ls = &ele1
+    call sum_list
+    halt                      # result should be in %rax
+
+# ls in %rdi, return in %rax
+sum_list:
+    xorq %rax, %rax           # val = 0 (accumulator in %rax)
+
+    andq %rdi, %rdi           # set flags based on ls
+    je done                   # if (ls == NULL) break
+
+    mrmovq 0(%rdi), %rcx      # rcx = ls->val
+    addq %rcx, %rax           # val += ls->val
+    mrmovq 8(%rdi), %rdi      # ls = ls->next
+
+    pushq %rax                # save val
+    call sum_list             # rest = rsum_list(ls->next)
+    popq %rcx                 # restore val
+    addq %rcx, %rax           # return val + rest
+
+done:
+    ret
+
+# -----------------------
+# struct ELE { long val; struct ELE* next; }
+# -----------------------
+    .align 8
+ele1:
+    .quad 0x00a
+    .quad ele2
+ele2:
+    .quad 0x0b0
+    .quad ele3
+ele3:
+    .quad 0xc00
+    .quad 0
+
+# -----------------------
+# Stack
+# -----------------------
+    .align 8
+    .pos 0x300
+stack:
+    .quad 0

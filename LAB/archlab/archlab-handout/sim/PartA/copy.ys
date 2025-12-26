@@ -1,0 +1,82 @@
+# copy.ys - Recursive version of sum_list
+#
+# /* copy_block - Copy src to dest and return xor checksum of src */
+# long copy_block(long *src, long *dest, long len)
+# {
+#     long result = 0;
+#     while (len > 0) {
+# 	long val = *src++;
+# 	*dest++ = val;
+# 	result ^= val;
+# 	len--;
+#     }
+#     return result;
+# }
+#
+
+    .pos 0
+    irmovq stack, %rsp
+
+    irmovq src,  %rdi         # arg1: src
+    irmovq dest, %rsi         # arg2: dest
+    irmovq len,  %rdx         # arg3: len
+    mrmovq 0(%rdx), %rdx      # rdx = *(&len) = 3
+
+    call copy_block
+    halt                      # expect %rax = 0xCBA, and dest updated
+
+# long copy_block(long *src, long *dest, long len)
+# rdi=src, rsi=dest, rdx=len, return rax=result
+copy_block:
+    xorq %rax, %rax           # result = 0
+
+loop:
+    andq %rdx, %rdx           # set flags based on len
+    jle done                   # if (len == 0) break
+
+    mrmovq 0(%rdi), %rcx      # rcx = *src
+    rmmovq %rcx, 0(%rsi)      # *dest = val
+    xorq %rcx, %rax           # result ^= val
+
+    irmovq $8, %r8             # increment pointers and decrement len
+    addq %r8, %rdi             # src++
+    addq %r8, %rsi             # dest++
+    irmovq $1, %r8             # one
+    subq %r8, %rdx             # len--
+    jmp loop
+
+done:
+    ret
+
+# -----------------------
+# Source block
+# -----------------------
+    .align 8
+src:
+    .quad 0x00a
+    .quad 0x0b0
+    .quad 0xc00
+
+# -----------------------
+# Destination block
+# -----------------------
+    .align 8
+dest:
+    .quad 0x111
+    .quad 0x222
+    .quad 0x333
+
+# -----------------------
+# Length of block (in longs)
+# -----------------------
+    .align 8
+len:
+    .quad 0x3
+
+# -----------------------
+# Stack
+# -----------------------
+    .align 8
+    .pos 0x300
+stack:
+    .quad 0

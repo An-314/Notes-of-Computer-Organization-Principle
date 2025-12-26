@@ -36,14 +36,22 @@ YAS:=misc/yas
 YIS:=misc/yis
 PARTA:=PartA
 
-parta: parta-sum
+parta: parta-sum parta-rsum parta-copy
 
 parta-sum: $(YAS) $(YIS)
 	$(YAS) $(PARTA)/sum.ys
-	$(YIS) $(PARTA)/sum.yo
+	$(YIS) $(PARTA)/sum.yo > $(PARTA)/sum.log
+
+parta-rsum: $(YAS) $(YIS)
+	$(YAS) $(PARTA)/rsum.ys
+	$(YIS) $(PARTA)/rsum.yo > $(PARTA)/rsum.log
+
+parta-copy: $(YAS) $(YIS)
+	$(YAS) $(PARTA)/copy.ys
+	$(YIS) $(PARTA)/copy.yo > $(PARTA)/copy.log
 
 clean-parta:
-	rm -f $(PARTA)/*.yo $(PARTA)/*.ys~ $(PARTA)/*~ $(PARTA)/core
+	rm -f $(PARTA)/*.yo $(PARTA)/*.log
 
 
 clean:

@@ -1,5 +1,9 @@
 *.yo
 *.o
+*.tab.c
+*.tab.h
+*.yy.c
+*.log
 
 hcl2c
 yas
@@ -9,3 +13,6 @@ ssim
 
 ldriver.ys
 sdriver.ys
+yas-grammar.c
+seq-std.c
+pipe-std.c
