@@ -1,0 +1,11 @@
+*.yo
+*.o
+
+hcl2c
+yas
+yis
+psim
+ssim
+
+ldriver.ys
+sdriver.ys

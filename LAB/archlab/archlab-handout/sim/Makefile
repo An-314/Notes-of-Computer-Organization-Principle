@@ -22,11 +22,29 @@ TKINC=-isystem /usr/include/tcl8.5
 # Use this rule (make all) to build the Y86-64 tools. The variables you've
 # assigned to GUIMODE, TKLIBS, and TKINC will override the values that
 # are currently assigned in seq/Makefile and pipe/Makefile.
+COMPAT = -std=gnu11 -fcommon
+
+.PHONY: parta parta-sum clean clean-parta clean-all
+
 all:
-	(cd misc; make all)
-	(cd pipe; make all GUIMODE=$(GUIMODE) TKLIBS="$(TKLIBS)" TKINC="$(TKINC)")
-	(cd seq; make all GUIMODE=$(GUIMODE) TKLIBS="$(TKLIBS)" TKINC="$(TKINC)")
-	(cd y86-code; make all)
+	(cd misc; make all CFLAGS="-Wall -O1 -g $(COMPAT)" LCFLAGS="-O1 $(COMPAT)")
+	(cd pipe; make all GUIMODE=$(GUIMODE) TKLIBS="$(TKLIBS)" TKINC="$(TKINC)" CFLAGS="-Wall -O2 $(COMPAT)")
+	(cd seq;  make all GUIMODE=$(GUIMODE) TKLIBS="$(TKLIBS)" TKINC="$(TKINC)" CFLAGS="-Wall -O2 $(COMPAT)")
+	(cd y86-code; make all CFLAGS="-Wall -O2 $(COMPAT)")
+
+YAS:=misc/yas
+YIS:=misc/yis
+PARTA:=PartA
+
+parta: parta-sum
+
+parta-sum: $(YAS) $(YIS)
+	$(YAS) $(PARTA)/sum.ys
+	$(YIS) $(PARTA)/sum.yo
+
+clean-parta:
+	rm -f $(PARTA)/*.yo $(PARTA)/*.ys~ $(PARTA)/*~ $(PARTA)/core
+
 
 clean:
 	rm -f *~ core
@@ -36,3 +54,4 @@ clean:
 	(cd y86-code; make clean)
 	(cd ptest; make clean)
 
+clean-all: clean clean-partA
