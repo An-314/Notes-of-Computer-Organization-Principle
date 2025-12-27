@@ -64,6 +64,12 @@ partb:
 
 PARTC:=PartC
 
+mkpipe:
+	(make clean)
+	(make)
+	(cd pipe; make clean; make VERSION=full GUIMODE=$(GUIMODE) TKLIBS="$(TKLIBS)" TKINC="$(TKINC)" CFLAGS="-Wall -O2 $(COMPAT)")
+
+
 partc:
 	mkdir -p $(PARTC)
 	(cd pipe; ../$(YAS) ncopy.ys 2>&1 | tee ../$(PARTC)/ncopy-yas.log)
