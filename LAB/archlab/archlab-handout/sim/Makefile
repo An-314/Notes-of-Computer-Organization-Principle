@@ -57,11 +57,21 @@ PARTB:=PartB
 
 partb:
 	mkdir -p $(PARTB)
-	(cd seq; ./ssim -t ../y86-code/asumi.yo > ../$(PARTB)/asumi-ssim.log)
-	(cd y86-code; make testssim > ../$(PARTB)/y86-testssim.log)
-	(cd ptest; make SIM=../seq/ssim > ../$(PARTB)/ptest-ssim.log)
-	(cd ptest; make SIM=../seq/ssim TFLAGS=-i > ../$(PARTB)/ptest-issim.log)
+	(cd seq; ./ssim -t ../y86-code/asumi.yo 2>&1 | tee ../$(PARTB)/asumi-ssim.log)
+	(cd y86-code; make testssim 2>&1 | tee ../$(PARTB)/y86-testssim.log)
+	(cd ptest; make SIM=../seq/ssim 2>&1 | tee ../$(PARTB)/ptest-ssim.log)
+	(cd ptest; make SIM=../seq/ssim TFLAGS=-i 2>&1 | tee ../$(PARTB)/ptest-issim.log)
 
+PARTC:=PartC
+
+partc:
+	mkdir -p $(PARTC)
+	(cd pipe; ../$(YAS) ncopy.ys 2>&1 | tee ../$(PARTC)/ncopy-yas.log)
+	(cd pipe; ./check-len.pl < ncopy.yo 2>&1 | tee ../$(PARTC)/ncopy-len.log)
+	(cd pipe; ../misc/yis sdriver.yo 2>&1 | tee ../$(PARTC)/sdriver-ypipe.log)
+	(cd pipe; ./correctness.pl 2>&1 | tee ../$(PARTC)/pipe-correctness.log)
+	(cd pipe; ./correctness.pl -p 2>&1 | tee ../$(PARTC)/pipe-pcorrectness.log)
+	(cd pipe; ./benchmark.pl 2>&1 | tee ../$(PARTC)/pipe-benchmark.log)
 clean:
 	rm -f *~ core
 	(cd misc; make clean)
