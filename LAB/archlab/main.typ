@@ -312,3 +312,122 @@ all:
   0x00b0:	0x0000000000000333	0x0000000000000c00
   0x02f8:	0x0000000000000000	0x000000000000003b
   ```
+
+== Part B: SEQ 处理器扩展
+
+修改顺序处理器 SEQ 的控制逻辑描述文件 `seq-full.hcl` ，使处理器支持新指令 `iaddq V, rB`。该指令的语义为：
+- 读取寄存器 `rB` 的旧值；
+- 取指令中的 8 字节立即数 `V`；
+- 执行加法并写回：`rB ← rB + V`；
+- 更新条件码CC（ZF/SF/OF）以反映结果。
+完成后需要编译生成新的`ssim`，并通过小程序与回归测试验证新增指令正确且不破坏原有指令行为。
+
+=== 指令计算过程
+
+参考教材对 irmovq（需要 valC）与 OPq（ALU 运算/写回/更新 CC）的描述，iaddq 的执行可以理解为二者的组合：
+- Fetch：读取 `icode/ifun`、`rA/rB`、`valC`，并计算 `valP`
+  - iaddq 需要 `regid` 字节（用于给出 `rB`）
+  - iaddq 需要 `valC`（8 字节立即数）
+- Decode：读取寄存器文件得到 `valB`（`rB` 的旧值）
+- Execute：ALU 执行 `valE = valB + valC`，并更新 `CC`
+- Memory：不读写数据存储器
+- Write back：将 `valE` 写回 `rB`
+- PC update：使用默认 `new_pc = valP`
+
+=== 控制逻辑修改
+
+为使 SEQ 正确支持 `iaddq` ，在 `seq-full.hcl` 中将 `IIADDQ` 纳入以下控制信号的选择逻辑：
+- 指令合法性与取指需求
+  - `instr_valid`：将 `IIADDQ` 加入合法指令集合，否则会被判为非法指令
+  - `need_regids`：`IIADDQ` 需要 `regid` 字节
+  - `need_valC`：`IIADDQ` 需要常数字 `valC`
+- 译码阶段寄存器选择
+  - srcB：`IIADDQ` 需要读取 `rB` 的旧值参与运算，故设置 `srcB = rB`
+  - dstE：`IIADDQ` 的写回目标为 `rB`，故设置 `dstE = rB`
+- 执行阶段 ALU 选择与条件码更新
+  - aluA：对 `IIADDQ` 选择 `valC`（立即数）作为 A 输入
+  - aluB：对 `IIADDQ` 选择 `valB`（`rB` 旧值）作为 B 输入
+  - alufun：保持默认加法 `ALUADD`
+  - set_cc：对 `IIADDQ` 设置为更新条件码
+
+=== 构建与测试
+
+完成 `seq-full.hcl` 修改后，修改`sim/Makefile`，添加 `partb` 目标以便快速测试：
+```make
+partb:
+	mkdir -p $(PARTB)
+	(cd seq; ./ssim -t ../y86-code/asumi.yo > ../$(PARTB)/asumi-ssim.log)
+	(cd y86-code; make testssim > ../$(PARTB)/y86-testssim.log)
+	(cd ptest; make SIM=../seq/ssim > ../$(PARTB)/ptest-ssim.log)
+	(cd ptest; make SIM=../seq/ssim TFLAGS=-i > ../$(PARTB)/ptest-issim.log)
+```
+先编译生成新的 `ssim`
+```bash
+make clean
+make VERSION=full
+```
+之后运行 `make partb`，通过 `asumi.yo` 小程序与回归测试验证新增指令正确性。结果如下
+```log
+Y86-64 Processor: seq-full.hcl
+137 bytes of code read
+IF: ...
+32 instructions executed
+Status = HLT
+Condition Codes: Z=1 S=0 O=0
+Changed Register State:
+%rax:	0x0000000000000000	0x0000abcdabcdabcd
+%rsp:	0x0000000000000000	0x0000000000000100
+%rdi:	0x0000000000000000	0x0000000000000038
+%r10:	0x0000000000000000	0x0000a000a000a000
+Changed Memory State:
+0x00f0:	0x0000000000000000	0x0000000000000055
+0x00f8:	0x0000000000000000	0x0000000000000013
+ISA Check Succeeds
+
+../seq/ssim -t ...
+grep "ISA Check" *.seq
+asumr.seq:ISA Check Succeeds
+asum.seq:ISA Check Succeeds
+cjr.seq:ISA Check Succeeds
+j-cc.seq:ISA Check Succeeds
+poptest.seq:ISA Check Succeeds
+prog1.seq:ISA Check Succeeds
+prog2.seq:ISA Check Succeeds
+prog3.seq:ISA Check Succeeds
+prog4.seq:ISA Check Succeeds
+prog5.seq:ISA Check Succeeds
+prog6.seq:ISA Check Succeeds
+prog7.seq:ISA Check Succeeds
+prog8.seq:ISA Check Succeeds
+pushquestion.seq:ISA Check Succeeds
+pushtest.seq:ISA Check Succeeds
+ret-hazard.seq:ISA Check Succeeds
+rm ...
+
+./optest.pl -s ../seq/ssim -i
+Simulating with ../seq/ssim
+  All 58 ISA Checks Succeed
+./jtest.pl -s ../seq/ssim -i
+Simulating with ../seq/ssim
+  All 96 ISA Checks Succeed
+./ctest.pl -s ../seq/ssim -i
+Simulating with ../seq/ssim
+  All 22 ISA Checks Succeed
+./htest.pl -s ../seq/ssim -i
+Simulating with ../seq/ssim
+  All 756 ISA Checks Succeed
+
+./optest.pl -s ../seq/ssim
+Simulating with ../seq/ssim
+  All 49 ISA Checks Succeed
+./jtest.pl -s ../seq/ssim
+Simulating with ../seq/ssim
+  All 64 ISA Checks Succeed
+./ctest.pl -s ../seq/ssim
+Simulating with ../seq/ssim
+  All 22 ISA Checks Succeed
+./htest.pl -s ../seq/ssim
+Simulating with ../seq/ssim
+  All 600 ISA Checks Succeed
+```
+这证明新增的 `iaddq` 指令功能正确，且未破坏原有指令行为。

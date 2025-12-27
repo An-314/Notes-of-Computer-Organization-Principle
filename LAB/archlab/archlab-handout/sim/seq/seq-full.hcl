@@ -1,3 +1,21 @@
+####################################################################
+## 实现新的 Y86-64 指令 iaddq（立即数加寄存器）
+## - 取指：有 regid（rA/rB 字节）+ 有 valC（8 字节立即数）
+## - 译码：需要读 rB 得到 valB
+## - 执行：ALU 做 valE = valB + valC
+## - 写回：把 valE 写回寄存器 rB
+## - 条件码：像 OPq 一样更新 CC（ZF/SF/OF）
+## - 不访问内存（mem_read/mem_write 都不该打开）
+## - PC 更新用默认 valP 
+####################################################################
+## iaddq V, rB:
+## Fetch: icode=IIADDQ, need_regids=1, need_valC=1
+## Decode: srcB=rB, dstE=rB
+## Execute: aluA=valC, aluB=valB, alufun=ADD, set_cc=1
+## Memory: none
+## PC: new_pc=valP
+####################################################################
+
 #/* $begin seq-all-hcl */
 ####################################################################
 #  HCL Description of Control for Single Cycle Y86-64 Processor SEQ   #
@@ -106,16 +124,16 @@ word ifun = [
 
 bool instr_valid = icode in 
 	{ INOP, IHALT, IRRMOVQ, IIRMOVQ, IRMMOVQ, IMRMOVQ,
-	       IOPQ, IJXX, ICALL, IRET, IPUSHQ, IPOPQ };
+	       IOPQ, IJXX, ICALL, IRET, IPUSHQ, IPOPQ, IIADDQ };
 
 # Does fetched instruction require a regid byte?
 bool need_regids =
 	icode in { IRRMOVQ, IOPQ, IPUSHQ, IPOPQ, 
-		     IIRMOVQ, IRMMOVQ, IMRMOVQ };
+		     IIRMOVQ, IRMMOVQ, IMRMOVQ, IIADDQ };
 
 # Does fetched instruction require a constant word?
 bool need_valC =
-	icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ, IJXX, ICALL };
+	icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ, IJXX, ICALL, IIADDQ };
 
 ################ Decode Stage    ###################################
 
@@ -128,7 +146,7 @@ word srcA = [
 
 ## What register should be used as the B source?
 word srcB = [
-	icode in { IOPQ, IRMMOVQ, IMRMOVQ  } : rB;
+	icode in { IOPQ, IRMMOVQ, IMRMOVQ, IIADDQ  } : rB;
 	icode in { IPUSHQ, IPOPQ, ICALL, IRET } : RRSP;
 	1 : RNONE;  # Don't need register
 ];
@@ -136,7 +154,7 @@ word srcB = [
 ## What register should be used as the E destination?
 word dstE = [
 	icode in { IRRMOVQ } && Cnd : rB;
-	icode in { IIRMOVQ, IOPQ} : rB;
+	icode in { IIRMOVQ, IOPQ, IIADDQ } : rB;
 	icode in { IPUSHQ, IPOPQ, ICALL, IRET } : RRSP;
 	1 : RNONE;  # Don't write any register
 ];
@@ -152,7 +170,7 @@ word dstM = [
 ## Select input A to ALU
 word aluA = [
 	icode in { IRRMOVQ, IOPQ } : valA;
-	icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ } : valC;
+	icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ, IIADDQ } : valC;
 	icode in { ICALL, IPUSHQ } : -8;
 	icode in { IRET, IPOPQ } : 8;
 	# Other instructions don't need ALU
@@ -161,7 +179,7 @@ word aluA = [
 ## Select input B to ALU
 word aluB = [
 	icode in { IRMMOVQ, IMRMOVQ, IOPQ, ICALL, 
-		      IPUSHQ, IRET, IPOPQ } : valB;
+		      IPUSHQ, IRET, IPOPQ, IIADDQ } : valB;
 	icode in { IRRMOVQ, IIRMOVQ } : 0;
 	# Other instructions don't need ALU
 ];
@@ -173,7 +191,7 @@ word alufun = [
 ];
 
 ## Should the condition codes be updated?
-bool set_cc = icode in { IOPQ };
+bool set_cc = icode in { IOPQ, IIADDQ };
 
 ################ Memory Stage    ###################################
 

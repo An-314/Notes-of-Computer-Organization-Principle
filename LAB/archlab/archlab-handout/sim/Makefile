@@ -53,6 +53,14 @@ parta-copy: $(YAS) $(YIS)
 clean-parta:
 	rm -f $(PARTA)/*.yo $(PARTA)/*.log
 
+PARTB:=PartB
+
+partb:
+	mkdir -p $(PARTB)
+	(cd seq; ./ssim -t ../y86-code/asumi.yo > ../$(PARTB)/asumi-ssim.log)
+	(cd y86-code; make testssim > ../$(PARTB)/y86-testssim.log)
+	(cd ptest; make SIM=../seq/ssim > ../$(PARTB)/ptest-ssim.log)
+	(cd ptest; make SIM=../seq/ssim TFLAGS=-i > ../$(PARTB)/ptest-issim.log)
 
 clean:
 	rm -f *~ core

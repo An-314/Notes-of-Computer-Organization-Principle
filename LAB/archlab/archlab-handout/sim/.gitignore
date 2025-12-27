@@ -15,4 +15,5 @@ ldriver.ys
 sdriver.ys
 yas-grammar.c
 seq-std.c
+seq-full.c
 pipe-std.c
