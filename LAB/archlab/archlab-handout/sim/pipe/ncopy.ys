@@ -21,9 +21,6 @@ ncopy:
     andq    %rdx, %rdx
     jle     Done
 
-    # constant 1
-    irmovq  $1, %r8
-
     # Pre-decrement len by 8 to set up the 8-way loop.
     # If len < 8, jump to remainder handler (with len stored as len-8).
     iaddq   $-8, %rdx
@@ -40,28 +37,28 @@ Loop8:
     rmmovq  %r10, 0(%rsi)
     andq    %r10, %r10
     jle     L0
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L0:
     mrmovq  32(%rdi), %r10
 
     rmmovq  %r11, 8(%rsi)
     andq    %r11, %r11
     jle     L1
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L1:
     mrmovq  40(%rdi), %r11
 
     rmmovq  %r12, 16(%rsi)
     andq    %r12, %r12
     jle     L2
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L2:
     mrmovq  48(%rdi), %r12
 
     rmmovq  %r13, 24(%rsi)
     andq    %r13, %r13
     jle     L3
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L3:
     mrmovq  56(%rdi), %r13
 
@@ -69,22 +66,22 @@ L3:
     rmmovq  %r10, 32(%rsi)
     andq    %r10, %r10
     jle     L4
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L4:
     rmmovq  %r11, 40(%rsi)
     andq    %r11, %r11
     jle     L5
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L5:
     rmmovq  %r12, 48(%rsi)
     andq    %r12, %r12
     jle     L6
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L6:
     rmmovq  %r13, 56(%rsi)
     andq    %r13, %r13
     jle     L7
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 L7:
     # Advance pointers
     iaddq   $64, %rdi
@@ -114,22 +111,22 @@ Rem4Check:
     rmmovq  %r10, 0(%rsi)
     andq    %r10, %r10
     jle     R40
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 R40:
     rmmovq  %r11, 8(%rsi)
     andq    %r11, %r11
     jle     R41
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 R41:
     rmmovq  %r12, 16(%rsi)
     andq    %r12, %r12
     jle     R42
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 R42:
     rmmovq  %r13, 24(%rsi)
     andq    %r13, %r13
     jle     R43
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 R43:
     iaddq   $32, %rdi
     iaddq   $32, %rsi
@@ -149,12 +146,12 @@ Rem2Check:
     rmmovq  %r10, 0(%rsi)
     andq    %r10, %r10
     jle     R20
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 R20:
     rmmovq  %r11, 8(%rsi)
     andq    %r11, %r11
     jle     R21
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 R21:
     iaddq   $16, %rdi
     iaddq   $16, %rsi
@@ -171,7 +168,7 @@ Rem1Check:
     rmmovq  %r10, 0(%rsi)
     andq    %r10, %r10
     jle     Done
-    addq    %r8,  %rax
+    iaddq   $1,  %rax
 ##################################################################
 # Do not modify the following section of code
 # Function epilogue.
