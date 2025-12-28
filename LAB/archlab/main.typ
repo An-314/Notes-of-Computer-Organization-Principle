@@ -431,3 +431,138 @@ Simulating with ../seq/ssim
   All 600 ISA Checks Succeed
 ```
 这证明新增的 `iaddq` 指令功能正确，且未破坏原有指令行为。
+
+== Part C: 流水线优化 ncopy
+
+=== 任务概述
+
+Part C 的目标是同时修改：
+- `ncopy.ys`：对给定的 src 数组复制到 dst，并返回 src 中 >0 的元素个数（返回值在 %rax）。
+- `pipe-full.hcl`：实现/支持 IIADDQ 指令，并保证流水线控制逻辑（stall/bubble/转移）正确，通过回归测试。
+性能指标为在 PIPE 模拟器上运行 `benchmark.pl` 得到的 Average CPE（1$~$64 长度取平均）。
+
+=== `ncopy.ys` 的优化思路与实现
+
+==== 瓶颈
+
+基准版 ncopy 的主要开销来自：
+- 循环控制开销（每处理 1 个元素就要更新 `len`、更新指针、分支回跳）
+- 频繁的分支（每个元素都要 `if (val > 0)`，会产生分支代价）
+- load/use hazard：`mrmovq` 后紧跟使用该寄存器（例如 `andq`）容易形成流水线停顿
+
+==== 核心优化：8-way loop unrolling + 指令调度隐藏 load/use
+
+- 主循环按 8 个元素展开（8-way unroll）
+  - 先将 `len` 预减 8，进入主循环，每次迭代处理 8 个元素，显著减少循环控制指令与回跳次数。
+- Load 与 Store/Test/Count 交织（隐藏 load/use 停顿）
+  - 先连续 load 4 个元素到寄存器
+  - 对这 4 个元素依次 store，并用 `andq` 设置条件码后 `jle` 判断是否计数
+  - 在每次 store/test 后立刻发起下一次 load（把后 4 个元素穿插加载进来）
+  - 最后对后 4 个元素执行 store/test/count
+  - 这样可以用“与 load 无关的指令”填充 load→use 的间隔，减少流水线 bubble。
+- 计数更新用 `iaddq $1, %rax`，不额外保留常量寄存器
+  - 避免 `irmovq $1, %r8 + addq %r8,%rax` 这种固定常量寄存器长期占用（同时也少一条依赖）。
+- 尾处理（remainder）按 4/2/1 分段
+  - 主循环退出后，将剩余元素数恢复为 0..7，然后：
+    - 若 `rem>=4` 处理 4 个
+    - 若 `rem>=2` 处理 2 个
+    - 若 `rem==1` 处理 1 个
+  - 分段 remainder 比单元素 `while` 更少分支/更少循环开销。
+
+==== 正确性保证
+
+- 每个元素都严格执行：
+  - `val = *src`
+  - `*dst = val`
+  - 若 `val > 0` 则 `count++`
+- `src`/`dst` 指针与 `len` 的更新和基准语义一致，尾处理覆盖所有 `len` 取值。
+
+=== `pipe-full.hcl` 的修改内容
+
+目标是两件事：
+- 实现 IIADDQ 指令的数据通路/控制信号
+- 支持一个简单的静态分支预测策略（BTFNT）并正确处理冒险与冲刷流水线
+
+==== `IIADDQ` 的实现点
+
+在 HCL 中，`IIADDQ rB, V` 等价于：
+- `valE = R[rB] + V`
+- 写回到 `rB`
+- 更新条件码（与 `OPQ` 类似）
+在这些地方加入了 IIADDQ：
+- `instr_valid`：把 `IIADDQ` 加入合法指令集合
+- `need_regids` / `need_valC`：`IIADDQ` 需要 regid + 立即数
+- Decode：
+  - `d_srcB`：`IIADDQ` 读取 `rB`
+  - `d_dstE`：`IIADDQ` 写回 `rB`
+- Execute：
+  - `aluA`：对 `IIADDQ` 选择 `E_valC`
+  - `aluB`：对 `IIADDQ` 选择 `E_valB`
+  - `set_cc`：对 `IIADDQ` 开启 CC 更新（并且仅在无异常状态下更新）
+
+==== 分支预测与冲刷（BTFNT）
+
+参考文件夹下的`pipe-btfnt.hcl`，实现一个简单的静态分支预测，策略是 Backward Taken / Forward Not Taken：
+- Fetch 阶段预测：
+  - 若 `IJXX` 的 `target (f_valC) < fall-through (f_valP)`，预测 taken，`f_predPC = f_valC`
+  - 否则预测 not-taken，`f_predPC = f_valP`
+- 在不新增 pipeline 字段的情况下判断预测是否错了：
+  - 在 Decode：对 `IJXX` 强制 `d_valA = D_valP`（即 fall-through）
+  - 在 Execute：对 `IJXX` ALU 计算 `valE = valC`（即 target）
+  - 于是到了 M 阶段，`M_valA` 就是 fall-through，`M_valE` 就是 target
+    - 只要比较 `M_valE < M_valA`，就能得到“当初 Fetch 的预测方向”，再与 `M_Cnd`（真实跳转条件）比对即可检测误预测。
+- PC 重定向（`f_pc`）：
+  - 误预测且真实不跳：回到 `M_valA`
+  - 误预测且真实跳：转到 `M_valE`
+- 冲刷流水线（`D_bubble` / `E_bubble`）：
+  - 当 Execute 判定分支误预测时，对 D/E 注入 bubble，丢弃错路径指令。
+
+=== 构建与测试
+
+完成 `pipe-full.hcl` 修改后，修改`sim/Makefile`，添加 `partc` 目标以便快速测试：
+```make
+mkpipe:
+	(make clean)
+	(make)
+	(cd pipe; make clean; make VERSION=full GUIMODE=$(GUIMODE) TKLIBS="$(TKLIBS)" TKINC="$(TKINC)" CFLAGS="-Wall -O2 $(COMPAT)")
+
+partc:
+	mkdir -p $(PARTC)
+	(cd pipe; ../$(YAS) ncopy.ys 2>&1 | tee ../$(PARTC)/ncopy-yas.log)
+	(cd pipe; ./check-len.pl < ncopy.yo 2>&1 | tee ../$(PARTC)/ncopy-len.log)
+	(cd pipe; ../misc/yis sdriver.yo 2>&1 | tee ../$(PARTC)/sdriver-ypipe.log)
+	(cd pipe; ./correctness.pl 2>&1 | tee ../$(PARTC)/pipe-correctness.log)
+	(cd pipe; ./correctness.pl -p 2>&1 | tee ../$(PARTC)/pipe-pcorrectness.log)
+	(cd pipe; ./benchmark.pl 2>&1 | tee ../$(PARTC)/pipe-benchmark.log)
+```
+先编译生成新的 `psim` 后，运行 `make partc`，通过正确性测试与性能基准测试验证修改正确性与性能提升。结果如下
+```log
+Simulating with instruction set simulator yis
+	ncopy
+0	OK
+...
+64	OK
+128	OK
+192	OK
+256	OK
+68/68 pass correctness test
+
+
+Simulating with pipeline simulator psim
+	ncopy
+0	OK
+...
+64	OK
+128	OK
+192	OK
+256	OK
+68/68 pass correctness test
+
+	ncopy
+0	15
+...
+64	416	6.50
+Average CPE	8.30
+Score	43.9/60.0
+```
+可以看到，新增的 IIADDQ 指令与分支预测逻辑均正确通过了测试，且 ncopy 的 Average CPE 从基准版的 10.5 降低到 8.3，性能显著提升。可以得到22分。

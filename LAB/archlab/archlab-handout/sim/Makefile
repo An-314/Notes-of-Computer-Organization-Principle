@@ -69,7 +69,6 @@ mkpipe:
 	(make)
 	(cd pipe; make clean; make VERSION=full GUIMODE=$(GUIMODE) TKLIBS="$(TKLIBS)" TKINC="$(TKINC)" CFLAGS="-Wall -O2 $(COMPAT)")
 
-
 partc:
 	mkdir -p $(PARTC)
 	(cd pipe; ../$(YAS) ncopy.ys 2>&1 | tee ../$(PARTC)/ncopy-yas.log)
@@ -78,6 +77,7 @@ partc:
 	(cd pipe; ./correctness.pl 2>&1 | tee ../$(PARTC)/pipe-correctness.log)
 	(cd pipe; ./correctness.pl -p 2>&1 | tee ../$(PARTC)/pipe-pcorrectness.log)
 	(cd pipe; ./benchmark.pl 2>&1 | tee ../$(PARTC)/pipe-benchmark.log)
+
 clean:
 	rm -f *~ core
 	(cd misc; make clean)
