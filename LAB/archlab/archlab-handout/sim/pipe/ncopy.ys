@@ -14,153 +14,164 @@
 ncopy:
 
 ##################################################################
-    xorq %rax, %rax          # count = 0
-    andq %rdx, %rdx
-    jle Done
+    # count = 0
+    xorq    %rax, %rax
 
-    irmovq $1, %r8           # const 1 for count++
+    # if len <= 0: return 0
+    andq    %rdx, %rdx
+    jle     Done
 
-# --------------------------
-# Main loop: 8-way unrolling
-# --------------------------
-Loop8Check:
-    rrmovq %rdx, %r14
-    iaddq $-8, %r14
-    jl Rem4Check
+    # constant 1
+    irmovq  $1, %r8
 
-    # preload first 4
-    mrmovq 0(%rdi),  %r10
-    mrmovq 8(%rdi),  %r11
-    mrmovq 16(%rdi), %r12
-    mrmovq 24(%rdi), %r13
+    # Pre-decrement len by 8 to set up the 8-way loop.
+    # If len < 8, jump to remainder handler (with len stored as len-8).
+    iaddq   $-8, %rdx
+    jl      RemLess8
 
-    # use r10, then load 5th into r10
-    rmmovq %r10, 0(%rsi)
-    andq %r10, %r10
-    jle L0
-    addq %r8, %rax
+Loop8:
+    # Load 4 values
+    mrmovq  0(%rdi),  %r10
+    mrmovq  8(%rdi),  %r11
+    mrmovq  16(%rdi), %r12
+    mrmovq  24(%rdi), %r13
+
+    # Store/test/count, while loading the next 4 values to keep load/use gaps.
+    rmmovq  %r10, 0(%rsi)
+    andq    %r10, %r10
+    jle     L0
+    addq    %r8,  %rax
 L0:
-    mrmovq 32(%rdi), %r10
+    mrmovq  32(%rdi), %r10
 
-    # use r11, then load 6th into r11
-    rmmovq %r11, 8(%rsi)
-    andq %r11, %r11
-    jle L1
-    addq %r8, %rax
+    rmmovq  %r11, 8(%rsi)
+    andq    %r11, %r11
+    jle     L1
+    addq    %r8,  %rax
 L1:
-    mrmovq 40(%rdi), %r11
+    mrmovq  40(%rdi), %r11
 
-    # use r12, then load 7th into r12
-    rmmovq %r12, 16(%rsi)
-    andq %r12, %r12
-    jle L2
-    addq %r8, %rax
+    rmmovq  %r12, 16(%rsi)
+    andq    %r12, %r12
+    jle     L2
+    addq    %r8,  %rax
 L2:
-    mrmovq 48(%rdi), %r12
+    mrmovq  48(%rdi), %r12
 
-    # use r13, then load 8th into r13
-    rmmovq %r13, 24(%rsi)
-    andq %r13, %r13
-    jle L3
-    addq %r8, %rax
+    rmmovq  %r13, 24(%rsi)
+    andq    %r13, %r13
+    jle     L3
+    addq    %r8,  %rax
 L3:
-    mrmovq 56(%rdi), %r13
+    mrmovq  56(%rdi), %r13
 
-    # now store/count the second 4 (in r10-r13)
-    rmmovq %r10, 32(%rsi)
-    andq %r10, %r10
-    jle L4
-    addq %r8, %rax
+    # Store/test/count the last 4 values.
+    rmmovq  %r10, 32(%rsi)
+    andq    %r10, %r10
+    jle     L4
+    addq    %r8,  %rax
 L4:
-    rmmovq %r11, 40(%rsi)
-    andq %r11, %r11
-    jle L5
-    addq %r8, %rax
+    rmmovq  %r11, 40(%rsi)
+    andq    %r11, %r11
+    jle     L5
+    addq    %r8,  %rax
 L5:
-    rmmovq %r12, 48(%rsi)
-    andq %r12, %r12
-    jle L6
-    addq %r8, %rax
+    rmmovq  %r12, 48(%rsi)
+    andq    %r12, %r12
+    jle     L6
+    addq    %r8,  %rax
 L6:
-    rmmovq %r13, 56(%rsi)
-    andq %r13, %r13
-    jle L7
-    addq %r8, %rax
+    rmmovq  %r13, 56(%rsi)
+    andq    %r13, %r13
+    jle     L7
+    addq    %r8,  %rax
 L7:
-    iaddq $64, %rdi          # src += 8*8
-    iaddq $64, %rsi          # dst += 8*8
-    iaddq $-8, %rdx          # len -= 8
-    jmp Loop8Check
+    # Advance pointers
+    iaddq   $64, %rdi
+    iaddq   $64, %rsi
 
-# --------------------------
-# Small remainder: handle len < 8 with 4/2/1 fall-through (no loops)
-# --------------------------
+    # len -= 8; if len >= 0, loop again
+    iaddq   $-8, %rdx
+    jge     Loop8
+
+RemLess8:
+    # Restore remaining length (0..7)
+    iaddq   $8, %rdx
+
 Rem4Check:
-    # if (len >= 4) do 4
-    rrmovq %rdx, %r14
-    iaddq $-4, %r14
-    jl Rem2
+    # if rem < 4 -> Rem2Check
+    rrmovq  %rdx, %r14
+    iaddq   $-4, %r14
+    jl      Rem2Check
 
-    mrmovq 0(%rdi),  %r10
-    mrmovq 8(%rdi),  %r11
-    mrmovq 16(%rdi), %r12
-    mrmovq 24(%rdi), %r13
+    # Load 4
+    mrmovq  0(%rdi),  %r10
+    mrmovq  8(%rdi),  %r11
+    mrmovq  16(%rdi), %r12
+    mrmovq  24(%rdi), %r13
 
-    rmmovq %r10, 0(%rsi)
-    andq %r10, %r10
-    jle S4_0
-    addq %r8, %rax
-S4_0:
-    rmmovq %r11, 8(%rsi)
-    andq %r11, %r11
-    jle S4_1
-    addq %r8, %rax
-S4_1:
-    rmmovq %r12, 16(%rsi)
-    andq %r12, %r12
-    jle S4_2
-    addq %r8, %rax
-S4_2:
-    rmmovq %r13, 24(%rsi)
-    andq %r13, %r13
-    jle S4_3
-    addq %r8, %rax
-S4_3:
-    iaddq $32, %rdi
-    iaddq $32, %rsi
-    iaddq $-4, %rdx
+    # Store/test/count 4
+    rmmovq  %r10, 0(%rsi)
+    andq    %r10, %r10
+    jle     R40
+    addq    %r8,  %rax
+R40:
+    rmmovq  %r11, 8(%rsi)
+    andq    %r11, %r11
+    jle     R41
+    addq    %r8,  %rax
+R41:
+    rmmovq  %r12, 16(%rsi)
+    andq    %r12, %r12
+    jle     R42
+    addq    %r8,  %rax
+R42:
+    rmmovq  %r13, 24(%rsi)
+    andq    %r13, %r13
+    jle     R43
+    addq    %r8,  %rax
+R43:
+    iaddq   $32, %rdi
+    iaddq   $32, %rsi
+    iaddq   $-4, %rdx
 
-Rem2:
-    # if (len >= 2) do 2
-    rrmovq %rdx, %r14
-    iaddq $-2, %r14
-    jl Rem1
+Rem2Check:
+    # if rem < 2 -> Rem1Check
+    rrmovq  %rdx, %r14
+    iaddq   $-2, %r14
+    jl      Rem1Check
 
-    mrmovq 0(%rdi), %r10
-    mrmovq 8(%rdi), %r11
-    rmmovq %r10, 0(%rsi)
-    andq %r10, %r10
-    jle S2_0
-    addq %r8, %rax
-S2_0:
-    rmmovq %r11, 8(%rsi)
-    andq %r11, %r11
-    jle S2_1
-    addq %r8, %rax
-S2_1:
-    iaddq $16, %rdi
-    iaddq $16, %rsi
-    iaddq $-2, %rdx
+    # Load 2
+    mrmovq  0(%rdi), %r10
+    mrmovq  8(%rdi), %r11
 
-Rem1:
-    andq %rdx, %rdx
-    jle Done
+    # Store/test/count 2
+    rmmovq  %r10, 0(%rsi)
+    andq    %r10, %r10
+    jle     R20
+    addq    %r8,  %rax
+R20:
+    rmmovq  %r11, 8(%rsi)
+    andq    %r11, %r11
+    jle     R21
+    addq    %r8,  %rax
+R21:
+    iaddq   $16, %rdi
+    iaddq   $16, %rsi
+    iaddq   $-2, %rdx
 
-    mrmovq 0(%rdi), %r10
-    rmmovq %r10, 0(%rsi)
-    andq %r10, %r10
-    jle Done
-    addq %r8, %rax
+Rem1Check:
+    andq    %rdx, %rdx
+    jle     Done
+
+    # Load 1, insert an independent instruction to avoid load/use stall
+    mrmovq  0(%rdi), %r10
+    iaddq   $-1, %rdx
+
+    rmmovq  %r10, 0(%rsi)
+    andq    %r10, %r10
+    jle     Done
+    addq    %r8,  %rax
 ##################################################################
 # Do not modify the following section of code
 # Function epilogue.
