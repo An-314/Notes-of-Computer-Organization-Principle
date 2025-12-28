@@ -20,3 +20,7 @@
 #pagebreak()
 
 #include "chap3.typ"
+
+#pagebreak()
+
+#include "chap4.typ"
