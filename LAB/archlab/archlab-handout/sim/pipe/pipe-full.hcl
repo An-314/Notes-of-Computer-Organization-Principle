@@ -135,13 +135,18 @@ wordsig W_valM  'mem_wb_curr->valm'	# Memory M value
 
 ## What address should instruction be fetched at
 word f_pc = [
-	# Mispredicted branch.  Fetch at incremented PC
-	M_icode == IJXX && !M_Cnd : M_valA;
-	# Completion of RET instruction
+	# Mispredicted branch.  Pred-taken & actually not taken -> fallthrough (valP)
+	M_icode == IJXX && (M_valE < M_valA) && !M_Cnd : M_valA;
+	# Mispredicted branch.  Pred-not-taken & actually taken -> target (valC)
+	M_icode == IJXX && !(M_valE < M_valA) && M_Cnd : M_valE;
+	# Early resolution of RET as soon as memory value is available
+	M_icode == IRET : m_valM;
+	# Fallback (kept for safety)
 	W_icode == IRET : W_valM;
 	# Default: Use predicted value of PC
 	1 : F_predPC;
 ];
+
 
 ## Determine icode of fetched instruction
 word f_icode = [
@@ -177,9 +182,13 @@ bool need_regids =
 bool need_valC =
 	f_icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ, IJXX, ICALL, IIADDQ };
 
-# Predict next value of PC
+# Predict next value of PC (BTFNT)
 word f_predPC = [
-	f_icode in { IJXX, ICALL } : f_valC;
+	# BTFNT for conditional branches: backward taken, forward not taken
+	f_icode == IJXX && (f_valC < f_valP) : f_valC;
+	# Calls are always taken
+	f_icode == ICALL : f_valC;
+	# Default: next sequential instruction
 	1 : f_valP;
 ];
 
@@ -239,7 +248,7 @@ word d_valB = [
 ## Select input A to ALU
 word aluA = [
 	E_icode in { IRRMOVQ, IOPQ } : E_valA;
-	E_icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ, IIADDQ } : E_valC;
+	E_icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ, IIADDQ, IJXX } : E_valC;
 	E_icode in { ICALL, IPUSHQ } : -8;
 	E_icode in { IRET, IPOPQ } : 8;
 	# Other instructions don't need ALU
@@ -249,7 +258,7 @@ word aluA = [
 word aluB = [
 	E_icode in { IRMMOVQ, IMRMOVQ, IOPQ, ICALL, 
 		     IPUSHQ, IRET, IPOPQ, IIADDQ } : E_valB;
-	E_icode in { IRRMOVQ, IIRMOVQ } : 0;
+	E_icode in { IRRMOVQ, IIRMOVQ, IJXX } : 0;
 	# Other instructions don't need ALU
 ];
 
@@ -324,7 +333,7 @@ bool F_stall =
 	E_icode in { IMRMOVQ, IPOPQ } &&
 	 E_dstM in { d_srcA, d_srcB } ||
 	# Stalling at fetch while ret passes through pipeline
-	IRET in { D_icode, E_icode, M_icode };
+	IRET in { D_icode, E_icode };
 
 # Should I stall or inject a bubble into Pipeline Register D?
 # At most one of these can be true.
@@ -334,19 +343,21 @@ bool D_stall =
 	 E_dstM in { d_srcA, d_srcB };
 
 bool D_bubble =
-	# Mispredicted branch
-	(E_icode == IJXX && !e_Cnd) ||
-	# Stalling at fetch while ret passes through pipeline
+	# Mispredicted branch (BTFNT)
+	(E_icode == IJXX && (E_valC < E_valA) && !e_Cnd) ||
+	(E_icode == IJXX && !(E_valC < E_valA) && e_Cnd) ||
+	# Stalling at fetch while ret passes through pipeline (only D/E now)
 	# but not condition for a load/use hazard
 	!(E_icode in { IMRMOVQ, IPOPQ } && E_dstM in { d_srcA, d_srcB }) &&
-	  IRET in { D_icode, E_icode, M_icode };
+	  IRET in { D_icode, E_icode };
 
 # Should I stall or inject a bubble into Pipeline Register E?
 # At most one of these can be true.
 bool E_stall = 0;
 bool E_bubble =
-	# Mispredicted branch
-	(E_icode == IJXX && !e_Cnd) ||
+	# Mispredicted branch (BTFNT)
+	(E_icode == IJXX && (E_valC < E_valA) && !e_Cnd) ||
+	(E_icode == IJXX && !(E_valC < E_valA) && e_Cnd) ||
 	# Conditions for a load/use hazard
 	E_icode in { IMRMOVQ, IPOPQ } &&
 	 E_dstM in { d_srcA, d_srcB};
