@@ -10,12 +10,11 @@
 #problem(subname: [6.11])[
   In general, if the high-order s bits of an address are used as the set index, contiguous chunks of memory blocks are mapped to the same cache set.
   + How many blocks are in each of these contiguous array chunks?
-  + Consider the following code that runs on a system with a cache of the form
+  + Consider the following code that runs on a system with a cache of the form $(S, E, B, m) = (512, 1, 32, 32)$:
   ```c
-  (S, E, B, m) = (512, 1, 32, 32):
   int array[4096];
   for (i = 0; i < 4096; i++)
-  sum += array[i];
+    sum += array[i];
   ```
   What is the maximum number of array blocks that are stored in the cache at any point in time?
 ]
